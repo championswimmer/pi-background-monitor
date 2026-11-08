@@ -20,6 +20,30 @@ Every job has a monitor identity. Extension instances in the same JavaScript pro
 
 Jobs run in an owned private tmux server, not your default server, and continue after Pi exits. Stop them explicitly; detached child processes may survive. Save the returned attach command for manual recovery. Commands run with your privileges, not in a sandbox; permissions for Pi's built-in Bash tool may not cover `background_start`. Inspected output is untrusted and may contain secrets.
 
-Watches are best-effort snapshots: transient or overwritten output may be missed. They expire, do not survive reload and cannot observe while Pi is closed. By default notifications are UI-only and not shown in noninteractive sessions; `nextTurn` delivers on the next turn, while `wake` may start a model turn. Automatic notifications include metadata, not output. A watch's interval and TTL can be updated. Limits are eight jobs per owner, 64 indexed monitors per process, eight watches per session and 64 watches total; inspection is bounded.
+Watches are best-effort snapshots: transient or overwritten output may be missed. They expire, do not survive reload and cannot observe while Pi is closed. By default notifications are UI-only and not shown in noninteractive sessions; `nextTurn` delivers on the next turn, while `wake` may start a model turn. Automatic notifications include metadata, not output. A watch's interval and TTL can be updated.
+
+### Tools
+
+`background_start` runs one command and returns its monitor `id`.
+
+- `command` (required): Bash script run in the current working directory, in a private tmux server. Jobs survive Pi exit.
+
+`background` manages monitors and watches with a required `action`:
+
+| `action`       | needs `id`        | does                                                                               |
+| -------------- | ----------------- | ---------------------------------------------------------------------------------- |
+| `list`         | —                 | List monitors indexed in this process (own first).                                 |
+| `inspect`      | monitor           | Bounded, untrusted snapshot of recent output and state.                            |
+| `stop`         | monitor           | Interrupt, then kill if needed; returns `cancelled` or `not-running`.              |
+| `forget`       | monitor           | Drop a stopped job from the index and delete its script.                           |
+| `server_stop`  | monitor, optional | Kill every job in that monitor's tmux server; without `id`, your session's server. |
+| `watch`        | monitor           | Subscribe this session; returns a watch `id`.                                      |
+| `watches`      | —                 | List this session's subscriptions.                                                 |
+| `update_watch` | watch             | Change interval, TTL, delivery, label or `once`.                                   |
+| `unwatch`      | watch             | Remove this session's subscription.                                                |
+
+Other arguments: `kind` (`contains` | `changed` | `exit`, required by `watch`); `pattern` (literal text for `contains`, 1–256 chars); `label` (≤120 chars); `delivery` (`ui` default, `nextTurn`, `wake`); `intervalSeconds` (1–300, default 5); `ttlSeconds` (1–1800, default 300; updates renew from now); `once` (default true). Watches need a state transition and a 10-second cooldown between notifications; `exit` watches always remove themselves. `update_watch` cannot change `kind` or `pattern`.
+
+Limits: 8 jobs per owner, 64 indexed monitors and 128 owners per process, 8 watches per session and 64 watches total. Inspection output is bounded.
 
 Recovery may fail after reboot, `/tmp` cleanup or socket loss; locks are never silently broken, and orphan cleanup is not automatic. `/tree` does not rewind processes. This is an early MVP, tested locally on Linux; macOS is covered by CI but has not been tested locally.
