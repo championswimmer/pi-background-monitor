@@ -1,5 +1,12 @@
 import { type ExtensionContext, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, SettingsList, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+  Container,
+  Key,
+  matchesKey,
+  SettingsList,
+  truncateToWidth,
+  visibleWidth,
+} from "@earendil-works/pi-tui";
 import { sanitize } from "./output.ts";
 
 export type Limits = { maxOpen: number; maxTotal: number };
@@ -45,20 +52,26 @@ function frame(
   ];
 }
 
-export async function settingsDialog(
+export async function dashboard(
   ctx: ExtensionContext,
+  jobs: Job[],
+  watches: Watch[],
   limits: Limits,
   save: (value: Limits) => void,
+  initialTab: "list" | "settings" = "list",
+  listError?: string,
 ) {
-  await ctx.ui.custom<void>((tui, theme, _keys, done) => {
+  await ctx.ui.custom<void>((tui, theme, keys, done) => {
+    let tab = initialTab;
+    let selected = 0;
     const values = Array.from({ length: 8 }, (_, i) => String(i + 1));
     const container = new Container();
     container.addChild({
       render: () =>
         (tui.terminal.rows || 24) < 15
-          ? [theme.fg("accent", theme.bold("Background monitor settings"))]
+          ? [theme.fg("accent", theme.bold("Settings"))]
           : [
-              theme.fg("accent", theme.bold("Background monitor settings")),
+              theme.fg("accent", theme.bold("Settings")),
               "",
               "Limits apply to jobs owned by this session (hard maximum: 8).",
               "Lowering a limit never stops or removes existing jobs.",
@@ -94,33 +107,35 @@ export async function settingsDialog(
     );
     container.addChild(list);
     return {
-      render: (width: number) =>
-        frame(container.render(Math.max(8, width - 2)), width, tui.terminal.rows || 24, (s) =>
-          theme.fg("border", s),
-        ),
-      invalidate: () => container.invalidate(),
-      handleInput(data: string) {
-        list.handleInput(data);
-        tui.requestRender();
-      },
-    };
-  }, overlay);
-}
-
-export async function dashboard(ctx: ExtensionContext, jobs: Job[], watches: Watch[]) {
-  await ctx.ui.custom<void>((tui, theme, keys, done) => {
-    let selected = 0;
-    return {
       render(width: number) {
-        const lines: string[] = [
+        const tabLabel = (label: string, active: boolean) =>
+          active
+            ? theme.bg("selectedBg", theme.fg("text", theme.bold(` ● ${label} `)))
+            : theme.fg("muted", `   ${label} `);
+        const tabs = [
           theme.fg("accent", theme.bold("Background monitors")),
+          `${tabLabel("Settings", tab === "settings")}  ${tabLabel("Monitors", tab === "list")}  ${theme.fg("dim", "Tab switch")}`,
+          "",
+        ];
+        if (tab === "settings") {
+          const lines = [
+            ...tabs,
+            ...container.render(Math.max(8, width - 2)),
+            "",
+            theme.fg("muted", "Tab switch · Esc close"),
+          ];
+          return frame(lines, width, tui.terminal.rows || 24, (s) => theme.fg("border", s));
+        }
+        const lines: string[] = [
+          ...tabs,
           theme.fg(
             "muted",
             `${jobs.length} shared monitor${jobs.length === 1 ? "" : "s"} · ${watches.length} session watch${watches.length === 1 ? "" : "es"}`,
           ),
           "",
         ];
-        if (!jobs.length) lines.push("No monitors yet. Start one with bgmon_start.");
+        if (listError) lines.push(theme.fg("error", safe(listError)));
+        else if (!jobs.length) lines.push("No monitors yet. Start one with bgmon_start.");
         else {
           lines.push(theme.fg("muted", "  STATUS     ID                        COMMAND"));
           const capacity = Math.max(1, (tui.terminal.rows || 24) - 17);
@@ -147,21 +162,27 @@ export async function dashboard(ctx: ExtensionContext, jobs: Job[], watches: Wat
             if (own.length > 3) lines.push(`  +${own.length - 3} more watches`);
           }
         }
-        lines.push(
-          "",
-          theme.fg("muted", "↑/↓ select · Esc/Enter close · /bgmon settings configure limits"),
-        );
+        lines.push("", theme.fg("muted", "↑/↓ select · Esc/Enter close · Tab switch"));
         return frame(lines, width, tui.terminal.rows || 24, (s) => theme.fg("border", s));
       },
       handleInput(data: string) {
-        if (keys.matches(data, "tui.select.cancel") || keys.matches(data, "tui.select.confirm"))
+        if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab"))) {
+          tab = tab === "list" ? "settings" : "list";
+        } else if (tab === "settings") {
+          list.handleInput(data);
+        } else if (
+          keys.matches(data, "tui.select.cancel") ||
+          keys.matches(data, "tui.select.confirm")
+        )
           done();
         else if (keys.matches(data, "tui.select.up")) selected = Math.max(0, selected - 1);
         else if (keys.matches(data, "tui.select.down"))
           selected = Math.max(0, Math.min(jobs.length - 1, selected + 1));
         tui.requestRender();
       },
-      invalidate() {},
+      invalidate() {
+        container.invalidate();
+      },
     };
   }, overlay);
 }

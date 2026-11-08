@@ -658,6 +658,8 @@ test("session monitor limits persist and never delete existing jobs", async () =
 });
 
 test("dashboard displays sanitized command and watch information and completes subcommands", async () => {
+  const { initTheme } = await import("@earendil-works/pi-coding-agent");
+  initTheme("dark", false);
   const a = runtime("dashboard-test");
   await a.start();
   try {
@@ -688,13 +690,24 @@ test("dashboard displays sanitized command and watch information and completes s
       assert.equal(options.overlay, true);
       const component = factory(
         { terminal: { rows: 24 }, requestRender() {} },
-        { fg: (_: any, text: string) => text, bold: (text: string) => text },
+        {
+          fg: (_: any, text: string) => text,
+          bg: (_: any, text: string) => `\x1b[44m${text}\x1b[49m`,
+          bold: (text: string) => text,
+        },
         { matches: (data: string, key: string) => data === key },
         () => {
           closed = true;
         },
       );
       output = component.render(80);
+      assert.match(output[2], /Settings.*Monitors/);
+      assert.ok(output.join("\n").includes("\x1b[44m ● Monitors \x1b[49m"));
+      component.handleInput("\t");
+      assert.ok(component.render(80).join("\n").includes("\x1b[44m ● Settings \x1b[49m"));
+      assert.match(component.render(80).join("\n"), /Maximum running monitors/);
+      component.handleInput("\t");
+      assert.ok(component.render(80).join("\n").includes("\x1b[44m ● Monitors \x1b[49m"));
       assert.match(output[0], /^╭─+╮$/);
       assert.match(output.at(-1)!, /^╰─+╯$/);
       assert.ok(output.every((line: string) => visibleWidth(line) === 80));
@@ -705,6 +718,7 @@ test("dashboard displays sanitized command and watch information and completes s
       assert.equal(closed, true);
     };
     await a.command("bgmon", "");
+    await a.command("bgmon", "list");
     assert.match(output.join("\n"), /sleep 30 # dashboard example/);
     assert.match(output.join("\n"), /every 17s.*expires/);
     assert.match(output.join("\n"), new RegExp(job.id));
@@ -726,11 +740,19 @@ test("settings dialog changes and saves session limits", async () => {
       assert.equal(options.overlay, true);
       const component = factory(
         { terminal: { rows: 24 }, requestRender() {} },
-        { fg: (_: any, value: string) => value, bold: (value: string) => value },
-        {},
+        {
+          fg: (_: any, value: string) => value,
+          bg: (_: any, value: string) => `\x1b[44m${value}\x1b[49m`,
+          bold: (value: string) => value,
+        },
+        { matches: (data: string, key: string) => data === key },
         () => {},
       );
       const lines = component.render(50);
+      assert.ok(lines.join("\n").includes("\x1b[44m ● Settings \x1b[49m"));
+      component.handleInput("\t");
+      assert.ok(component.render(50).join("\n").includes("\x1b[44m ● Monitors \x1b[49m"));
+      component.handleInput("\t");
       assert.match(lines[0], /^╭─+╮$/);
       assert.match(lines.at(-1), /^╰─+╯$/);
       component.handleInput("\r");
@@ -745,4 +767,31 @@ test("settings dialog changes and saves session limits", async () => {
     await a.call("bgmon_control", { action: "server_stop" });
     await a.close();
   }
+});
+
+test("settings remain accessible when monitor data cannot be loaded", async () => {
+  const { dashboard, DEFAULT_LIMITS } = await import("../src/ui.ts");
+  const { initTheme } = await import("@earendil-works/pi-coding-agent");
+  initTheme("dark", false);
+  const ctx: any = {
+    ui: {
+      custom: async (factory: any) => {
+        const component = factory(
+          { terminal: { rows: 24 }, requestRender() {} },
+          {
+            fg: (_: string, value: string) => value,
+            bg: (_: string, value: string) => `\x1b[44m${value}\x1b[49m`,
+            bold: (value: string) => value,
+          },
+          { matches: (data: string, key: string) => data === key },
+          () => {},
+        );
+        assert.ok(component.render(80).join("\n").includes("\x1b[44m ● Settings \x1b[49m"));
+        component.handleInput("\t");
+        assert.match(component.render(80).join("\n"), /monitor data unavailable/);
+        assert.doesNotMatch(component.render(80).join("\n"), /No monitors yet/);
+      },
+    },
+  };
+  await dashboard(ctx, [], [], DEFAULT_LIMITS, () => {}, "settings", "monitor data unavailable");
 });

@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { type Binding, broker, type Delivery } from "./broker.ts";
-import { DEFAULT_LIMITS, dashboard, type Limits, settingsDialog, validLimits } from "./ui.ts";
+import { DEFAULT_LIMITS, dashboard, type Limits, validLimits } from "./ui.ts";
 
 const ENTRY = "pi-background-monitor:locator:v1";
 const SETTINGS = "pi-background-monitor:settings:v1";
@@ -268,17 +268,8 @@ export default function extension(pi: ExtensionAPI) {
         ctx.ui.notify("Usage: /bgmon [list | settings | stop-server]", "info");
         return;
       }
-      if (command === "settings") {
-        if (!ctx.hasUI || ctx.mode !== "tui") {
-          ctx.ui.notify("/bgmon settings requires TUI mode", "error");
-          return;
-        }
-        const current = get();
-        await settingsDialog(ctx, limits, (value) => {
-          if (!current.active || current !== binding) return;
-          limits = value;
-          pi.appendEntry(SETTINGS, { session: current.session, limits });
-        });
+      if (command === "settings" && (!ctx.hasUI || ctx.mode !== "tui")) {
+        ctx.ui.notify("/bgmon settings requires TUI mode", "error");
         return;
       }
       if (command === "stop-server") {
@@ -287,16 +278,30 @@ export default function extension(pi: ExtensionAPI) {
         return;
       }
       const r = await run(() => broker.action(get(), "list", {}));
-      if (!ctx.hasUI || ctx.mode !== "tui" || !Array.isArray(r.details)) {
+      if (!ctx.hasUI || ctx.mode !== "tui") {
         ctx.ui.notify(r.content[0].text, "info");
         return;
       }
       const w = await run(() => broker.action(get(), "watches", {}));
-      if (!Array.isArray(w.details)) {
-        ctx.ui.notify(w.content[0].text, "error");
-        return;
-      }
-      await dashboard(ctx, r.details, w.details);
+      const listError = !Array.isArray(r.details)
+        ? r.content[0].text
+        : !Array.isArray(w.details)
+          ? w.content[0].text
+          : undefined;
+      const current = get();
+      await dashboard(
+        ctx,
+        Array.isArray(r.details) ? r.details : [],
+        Array.isArray(w.details) ? w.details : [],
+        limits,
+        (value) => {
+          if (!current.active || current !== binding) return;
+          limits = value;
+          pi.appendEntry(SETTINGS, { session: current.session, limits });
+        },
+        command === "settings" ? "settings" : "list",
+        listError,
+      );
     },
   });
 }

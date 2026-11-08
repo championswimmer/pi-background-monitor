@@ -14,7 +14,7 @@ Reload Pi after installation. For a local checkout use `pi install ./pi-backgrou
 
 ## Use
 
-Ask Pi to start, inspect, stop, or watch a background task. `/bgmon` opens a monitor dashboard; `/bgmon settings` configures session limits, and `/bgmon stop-server` stops all jobs in your session's server. `bgmon_control` can instead stop **all jobs in a monitor's owning server**.
+Ask Pi to start, inspect, stop, or watch a background task. `/bgmon` or `/bgmon list` opens the monitors tab; `/bgmon settings` opens session limits. Press Tab to switch between tabs. `/bgmon stop-server` stops all jobs in your session's server. `bgmon_control` can instead stop **all jobs in a monitor's owning server**.
 
 Every job has a monitor identity. Extension instances in the same JavaScript process share an in-memory index: any can list, inspect, or stop an indexed monitor, and multiple sessions can independently watch it. Each session manages only its own watches. To receive notifications in a child session, that session must load the extension locally; an inherited tool bridge executes in its host session and its watches notify the host instead. Separate processes and worker threads do not share this index. On last session shutdown the index is dropped and jobs detach; only the original Pi session can recover its jobs from its saved locator. New or forked sessions cannot recover them from disk.
 
