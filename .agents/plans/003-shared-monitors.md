@@ -49,7 +49,7 @@ and cleanup costs not required here. No cross-process sharing is claimed.
 - [x] Validate separate factories/loader instances, cross-runtime access and watches,
   creator/last-runtime shutdown, recovery, watch updates/removal and safety regressions.
 - [x] Independent reviewer pass; repair demonstrated issues and rerun checks.
-- [ ] Commit implementation and review fixes as logical milestones; push each.
+- [x] Commit implementation and review fixes as logical milestones; push each.
 
 ## Tool decision
 
@@ -102,6 +102,14 @@ Independent reviewer `shared-monitor-review` completed with no demonstrated
 correctness/security findings. Remaining limitations: global-queue head-of-line
 blocking, caller recovery failure still blocks list, no macOS/long-run local test.
 The reviewer noted missing direct global-cap cleanup coverage; focused follow-up
-regressions will address that validation gap. No sibling orchestrator changes are
+regressions now address that validation gap. No sibling orchestrator changes are
 required. The broker also caps owner backends at 128, reclaims inactive empty
 owners, and serializes all broker operations conservatively.
+
+Core implementation committed/pushed as `2587e2b`. Follow-up tests exercise the
+64-monitor cap including previously detached recovery and cleanup at capacity,
+128-owner backend cap/release, and 64-watch cap/reuse/server-stop invalidation.
+Architect independently inspected these tests and reran typecheck, all tests
+(18/18, approximately 13 seconds) and whitespace checks successfully. Coder also
+reran formatting and lint successfully. Follow-up is tests/plan-only; the reviewed
+runtime implementation is unchanged. All implementation phases are complete.

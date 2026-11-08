@@ -413,3 +413,129 @@ test("broken own locator cannot block known shared identities or watch cleanup",
     await b.close();
   }
 });
+
+test("shared monitor capacity preserves server cleanup and permits reuse", async () => {
+  // Create a recoverable owner before filling the process index, then drop the index.
+  const saved = runtime("capacity-saved");
+  await saved.start();
+  const old = await saved.call("background_start", { command: "sleep 60" });
+  if (!old.id) {
+    await saved.call("background", { action: "server_stop" });
+    await saved.close();
+    assert.fail(JSON.stringify(old));
+  }
+  await saved.close();
+  const owners = Array.from({ length: 8 }, (_, i) => runtime(`capacity-owner-${i}`));
+  const extra = runtime("capacity-saved", saved.entries);
+  const ids: string[] = [];
+  let extraStarted = false;
+  try {
+    for (const owner of owners) {
+      await owner.start();
+      for (let j = 0; j < 8; j++) {
+        const job = await owner.call("background_start", { command: "exit 0" });
+        assert.ok(job.id, JSON.stringify(job));
+        ids.push(job.id);
+      }
+    }
+    assert.equal(ids.length, 64);
+    await extra.start();
+    extraStarted = true;
+    assert.match(
+      (await extra.call("background", { action: "list" })).error,
+      /Maximum 64 shared monitors/,
+    );
+    assert.match(
+      (await extra.call("background_start", { command: "exit 0" })).error,
+      /Maximum 64 shared monitors/,
+    );
+    // This direct cleanup must work even though recovery cannot index its retained job.
+    assert.equal((await extra.call("background", { action: "server_stop" })).stopped, true);
+    assert.equal(
+      (await extra.call("background", { action: "server_stop", id: ids[0] })).stopped,
+      true,
+    );
+    const retry = await extra.call("background_start", { command: "exit 0" });
+    assert.ok(retry.id, JSON.stringify(retry));
+    assert.equal((await extra.call("background", { action: "list" })).length, 57);
+  } finally {
+    // Every stop targets only the private server owned by the corresponding runtime.
+    for (const owner of owners) await owner.call("background", { action: "server_stop" });
+    for (const owner of owners) await owner.close();
+    if (!extraStarted) await extra.start();
+    await extra.call("background", { action: "server_stop" });
+    await extra.close();
+  }
+});
+
+test("empty owner backend cap releases a slot on session shutdown", async () => {
+  const owners = Array.from({ length: 129 }, (_, i) => runtime(`empty-owner-${i}`));
+  try {
+    for (let i = 0; i < 128; i++) {
+      await owners[i].start();
+      assert.deepEqual(await owners[i].call("background", { action: "list" }), []);
+    }
+    await owners[128].start();
+    assert.match(
+      (await owners[128].call("background", { action: "list" })).error,
+      /Maximum 128 active monitor owners/,
+    );
+    await owners[0].close();
+    assert.deepEqual(await owners[128].call("background", { action: "list" }), []);
+  } finally {
+    for (const owner of owners) await owner.close();
+  }
+  const fresh = runtime("empty-owner-fresh");
+  await fresh.start();
+  try {
+    assert.deepEqual(await fresh.call("background", { action: "list" }), []);
+  } finally {
+    await fresh.close();
+  }
+});
+
+test("shared watch capacity frees slots and server stop invalidates all subscriptions", async () => {
+  const owner = runtime("watch-cap-owner");
+  const watchers = Array.from({ length: 9 }, (_, i) => runtime(`watch-cap-${i}`));
+  await owner.start();
+  try {
+    const job = await owner.call("background_start", { command: "sleep 30" });
+    assert.ok(job.id, JSON.stringify(job));
+    let firstWatch = "";
+    for (let i = 0; i < 8; i++) {
+      await watchers[i].start();
+      for (let j = 0; j < 8; j++) {
+        const watch = await watchers[i].call("background", {
+          action: "watch",
+          id: job.id,
+          kind: "exit",
+          intervalSeconds: 300,
+        });
+        assert.ok(watch.id, JSON.stringify(watch));
+        if (i === 0 && j === 0) firstWatch = watch.id;
+      }
+    }
+    await watchers[8].start();
+    assert.match(
+      (await watchers[8].call("background", { action: "watch", id: job.id, kind: "exit" })).error,
+      /64 shared watches/,
+    );
+    assert.equal(
+      (await watchers[0].call("background", { action: "unwatch", id: firstWatch })).removed,
+      true,
+    );
+    const retry = await watchers[8].call("background", {
+      action: "watch",
+      id: job.id,
+      kind: "exit",
+    });
+    assert.ok(retry.id, JSON.stringify(retry));
+    assert.equal((await owner.call("background", { action: "server_stop" })).stopped, true);
+    for (const watcher of watchers)
+      assert.deepEqual(await watcher.call("background", { action: "watches" }), []);
+  } finally {
+    await owner.call("background", { action: "server_stop" });
+    for (const watcher of watchers) await watcher.close();
+    await owner.close();
+  }
+});
