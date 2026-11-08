@@ -1,5 +1,5 @@
 import { type ExtensionContext, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
-import { Container, SettingsList, truncateToWidth } from "@earendil-works/pi-tui";
+import { Container, SettingsList, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { sanitize } from "./output.ts";
 
 export type Limits = { maxOpen: number; maxTotal: number };
@@ -19,6 +19,32 @@ type Watch = {
 };
 const safe = (s: string) => sanitize(s).replace(/\s+/g, " ");
 
+// Leave one terminal row around the overlay, matching its configured margin.
+const overlay = { overlay: true, overlayOptions: { width: 100, margin: 1 } };
+
+function frame(
+  lines: string[],
+  width: number,
+  rows: number,
+  color: (text: string) => string,
+): string[] {
+  if (width < 2)
+    return lines.slice(0, Math.max(1, rows - 2)).map((line) => truncateToWidth(line, width));
+  const inner = width - 2;
+  const body = lines.slice(0, Math.max(0, rows - 4));
+  const border = (left: string, right: string) => color(left + "─".repeat(inner) + right);
+  return [
+    border("╭", "╮"),
+    ...body.map((line) => {
+      const content = truncateToWidth(line, inner);
+      return (
+        color("│") + content + " ".repeat(Math.max(0, inner - visibleWidth(content))) + color("│")
+      );
+    }),
+    border("╰", "╯"),
+  ];
+}
+
 export async function settingsDialog(
   ctx: ExtensionContext,
   limits: Limits,
@@ -28,13 +54,16 @@ export async function settingsDialog(
     const values = Array.from({ length: 8 }, (_, i) => String(i + 1));
     const container = new Container();
     container.addChild({
-      render: () => [
-        theme.fg("accent", theme.bold("Background monitor settings")),
-        "",
-        "Limits apply to jobs owned by this session (hard maximum: 8).",
-        "Lowering a limit never stops or removes existing jobs.",
-        "",
-      ],
+      render: () =>
+        (tui.terminal.rows || 24) < 15
+          ? [theme.fg("accent", theme.bold("Background monitor settings"))]
+          : [
+              theme.fg("accent", theme.bold("Background monitor settings")),
+              "",
+              "Limits apply to jobs owned by this session (hard maximum: 8).",
+              "Lowering a limit never stops or removes existing jobs.",
+              "",
+            ],
       invalidate() {},
     });
     const list = new SettingsList(
@@ -66,14 +95,16 @@ export async function settingsDialog(
     container.addChild(list);
     return {
       render: (width: number) =>
-        container.render(width).map((line) => truncateToWidth(line, width)),
+        frame(container.render(Math.max(8, width - 2)), width, tui.terminal.rows || 24, (s) =>
+          theme.fg("border", s),
+        ),
       invalidate: () => container.invalidate(),
       handleInput(data: string) {
         list.handleInput(data);
         tui.requestRender();
       },
     };
-  });
+  }, overlay);
 }
 
 export async function dashboard(ctx: ExtensionContext, jobs: Job[], watches: Watch[]) {
@@ -92,7 +123,7 @@ export async function dashboard(ctx: ExtensionContext, jobs: Job[], watches: Wat
         if (!jobs.length) lines.push("No monitors yet. Start one with bgmon_start.");
         else {
           lines.push(theme.fg("muted", "  STATUS     ID                        COMMAND"));
-          const capacity = Math.max(1, (tui.terminal.rows || 24) - 13);
+          const capacity = Math.max(1, (tui.terminal.rows || 24) - 17);
           const start = Math.max(0, Math.min(selected - capacity + 1, jobs.length - capacity));
           for (let i = start; i < Math.min(jobs.length, start + capacity); i++) {
             const job = jobs[i];
@@ -120,7 +151,7 @@ export async function dashboard(ctx: ExtensionContext, jobs: Job[], watches: Wat
           "",
           theme.fg("muted", "↑/↓ select · Esc/Enter close · /bgmon settings configure limits"),
         );
-        return lines.map((line) => truncateToWidth(line, Math.max(1, width)));
+        return frame(lines, width, tui.terminal.rows || 24, (s) => theme.fg("border", s));
       },
       handleInput(data: string) {
         if (keys.matches(data, "tui.select.cancel") || keys.matches(data, "tui.select.confirm"))
@@ -132,5 +163,5 @@ export async function dashboard(ctx: ExtensionContext, jobs: Job[], watches: Wat
       },
       invalidate() {},
     };
-  });
+  }, overlay);
 }

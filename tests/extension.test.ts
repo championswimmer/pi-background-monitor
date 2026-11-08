@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import extension from "../src/index.ts";
 
 test("watch wakes only on selected event, not routine output; shutdown detaches", async () => {
@@ -680,16 +681,28 @@ test("dashboard displays sanitized command and watch information and completes s
       ttlSeconds: 90,
     });
     let output: string[] = [];
+    let closed = false;
     a.ctx.hasUI = true;
     a.ctx.mode = "tui";
-    a.ctx.ui.custom = async (factory: any) => {
+    a.ctx.ui.custom = async (factory: any, options: any) => {
+      assert.equal(options.overlay, true);
       const component = factory(
         { terminal: { rows: 24 }, requestRender() {} },
         { fg: (_: any, text: string) => text, bold: (text: string) => text },
-        { matches: () => false },
-        () => {},
+        { matches: (data: string, key: string) => data === key },
+        () => {
+          closed = true;
+        },
       );
-      output = component.render(120);
+      output = component.render(80);
+      assert.match(output[0], /^╭─+╮$/);
+      assert.match(output.at(-1)!, /^╰─+╯$/);
+      assert.ok(output.every((line: string) => visibleWidth(line) === 80));
+      const narrow = component.render(30);
+      assert.match(narrow.at(-1), /^╰─+╯$/);
+      assert.ok(narrow.every((line: string) => visibleWidth(line) === 30));
+      component.handleInput("tui.select.cancel");
+      assert.equal(closed, true);
     };
     await a.command("bgmon", "");
     assert.match(output.join("\n"), /sleep 30 # dashboard example/);
@@ -709,13 +722,17 @@ test("settings dialog changes and saves session limits", async () => {
   try {
     a.ctx.hasUI = true;
     a.ctx.mode = "tui";
-    a.ctx.ui.custom = async (factory: any) => {
+    a.ctx.ui.custom = async (factory: any, options: any) => {
+      assert.equal(options.overlay, true);
       const component = factory(
-        { requestRender() {} },
+        { terminal: { rows: 24 }, requestRender() {} },
         { fg: (_: any, value: string) => value, bold: (value: string) => value },
         {},
         () => {},
       );
+      const lines = component.render(50);
+      assert.match(lines[0], /^╭─+╮$/);
+      assert.match(lines.at(-1), /^╰─+╯$/);
       component.handleInput("\r");
     };
     await a.command("bgmon", "settings");
