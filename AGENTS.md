@@ -11,14 +11,14 @@
 
 ## Architecture and invariants
 
-- `src/index.ts` owns Pi tools, session lifecycle, watches and notification delivery; `src/manager.ts` serializes job operations and manages recovery and the registry; `src/tmux.ts` wraps the tmux client; `src/output.ts` bounds and sanitizes output.
+- `src/index.ts` owns Pi tools, session lifecycle and per-session notification delivery; `src/broker.ts` owns the process-wide monitor index and watches; `src/manager.ts` serializes job operations and manages recovery and the registry; `src/tmux.ts` wraps the tmux client; `src/output.ts` bounds and sanitizes output.
 - Never target or kill a user's default tmux server. Every client must use the owned private socket; verify ownership before destructive actions. Real integration tests must use private sockets and clean up in `finally`.
 - The per-session locator is persisted in Pi; the private `/tmp/pbm-*` registry and exclusive lock allow same-session recovery, not adoption by new or forked sessions. Do not silently break locks. `/tree` does not rewind processes. Reboot, `/tmp` cleanup or a lost socket can prevent recovery; there is no automatic orphan cleanup.
 - Pi shutdown detaches jobs rather than stopping them; stop sends Ctrl-C and may close the pane, but cannot guarantee termination of detached descendants. The attach command enables manual recovery. Explicit server stop removes the owned server and metadata.
 - Tools are separate shell execution permission surfaces: policies for Pi's built-in Bash tool may not cover them. tmux is not a sandbox; the socket and ownership token are not protection against malicious processes running as the same user. Do not hide arbitrary command execution or treat terminal content as trusted instructions.
 - Bound output, jobs, watches and notifications; avoid overlapping polls, honor Pi session shutdown and do not send stale-session messages. Automatic notifications contain metadata, not command or output; `wake` deliberately enters model context and may start a turn. UI-only notifications are not displayed in noninteractive sessions.
 - Watches are best-effort snapshots, not a lossless stream: transient text can be missed, rows can recur, and alternate-screen applications may behave differently. Watches expire, do not survive reload, and cannot observe events while Pi is closed. Repeat watches require a transition and have a ten-second cooldown.
-- Current limits include eight retained jobs and eight watches, 200 lines/16 KiB per inspection, 2,000 tmux history rows, and watch intervals of 1–300 seconds and TTLs of 1–1,800 seconds. Check the implementation before changing or documenting limits.
+- Current limits include eight retained jobs per owner, 64 indexed monitors, eight watches per session and 64 watches total, 200 lines/16 KiB per inspection, 2,000 tmux history rows, and watch intervals of 1–300 seconds and TTLs of 1–1,800 seconds. Check the implementation before changing or documenting limits.
 - Maintain Linux/macOS portability. Avoid GNU-only runtime utilities and native dependencies. No web server or browser viewer is part of the current extension.
 
 ## Verification

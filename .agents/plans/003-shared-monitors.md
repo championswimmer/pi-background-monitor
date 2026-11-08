@@ -33,22 +33,22 @@ and cleanup costs not required here. No cross-process sharing is claimed.
 
 - [x] Inspect architecture, safety invariants, planning skill and installed Pi docs.
 - [x] Decide generic sharing/lifetime boundaries and compare alternatives.
-- [ ] Implement shared broker, identity index and compact tools.
+- [x] Implement shared broker, identity index and compact tools.
   - One central Map keyed by returned monitor/job ID; bounded process-wide capacity.
   - Serialized operations per owner backend retain private socket/lock protections.
   - Lazy same-session recovery indexes retained jobs; no fork/new locator adoption.
   - Creator shutdown removes its subscriptions, not others' monitors.
   - Backend persistence binds only to a live owning session; never append to stale Pi.
   - Last runtime shutdown clears live state/releases locks without terminating jobs.
-- [ ] Implement independent bounded subscriptions, watch listing/removal/update.
+- [x] Implement independent bounded subscriptions, watch listing/removal/update.
   - Shared nonoverlapping polls, independent matching state and delivery queues.
   - Existing TTL, interval, snapshot and repeat cooldown semantics remain bounded.
   - Shutdown/generation guards prevent stale delivery; notifications contain metadata.
-- [ ] Document two tools, identity/control semantics, same-process boundary and
+- [x] Document two tools, identity/control semantics, same-process boundary and
   orchestrator-neutral child-local versus inherited-bridge behavior.
-- [ ] Validate separate factories/loader instances, cross-runtime access and watches,
+- [x] Validate separate factories/loader instances, cross-runtime access and watches,
   creator/last-runtime shutdown, recovery, watch updates/removal and safety regressions.
-- [ ] Independent reviewer pass; repair demonstrated issues and rerun checks.
+- [x] Independent reviewer pass; repair demonstrated issues and rerun checks.
 - [ ] Commit implementation and review fixes as logical milestones; push each.
 
 ## Tool decision
@@ -84,6 +84,24 @@ commit, preserve unrelated changes, and report exact commit/push outcomes.
 
 ## Progress / verification log
 
-Initial design and delegation recorded before implementation. Implementation is
-owned by coder `shared-monitor-implementation`; plan/commit coordination belongs
-to architect. No changes to the sibling orchestrator are required.
+Initial design/plan committed and pushed as `fc78ee0`. Coder
+`shared-monitor-implementation` implemented broker, compact tools, lifecycle and
+subscription handling, README/AGENTS updates and regressions. Architect inspected
+actual changes and independently ran `git diff --check`, `npm run check`,
+`npm run lint`, `npm test` (15/15) and `npm pack --dry-run`: all passed on Linux.
+Lint emits nonfatal non-null-assertion warnings; macOS has not run locally.
+
+Architect self-review repaired unconditional caller recovery (broken/full caller
+registries must not block known shared IDs or watch cleanup) and caught deferred
+notification delivery exceptions. A strengthened real Pi `loadExtensions` regression
+executes two independent jiti-loaded factories against a private tmux monitor,
+including watch delivery/control after creator shutdown. Other regressions cover
+same-session recovery, final-close/new-session races and malformed caller locators.
+
+Independent reviewer `shared-monitor-review` completed with no demonstrated
+correctness/security findings. Remaining limitations: global-queue head-of-line
+blocking, caller recovery failure still blocks list, no macOS/long-run local test.
+The reviewer noted missing direct global-cap cleanup coverage; focused follow-up
+regressions will address that validation gap. No sibling orchestrator changes are
+required. The broker also caps owner backends at 128, reclaims inactive empty
+owners, and serializes all broker operations conservatively.
