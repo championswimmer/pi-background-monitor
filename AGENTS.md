@@ -18,4 +18,4 @@
 
 ## Verification
 
-Run `npm run check`, `npm test`, and relevant focused regressions. Real integration tests must use private sockets and clean up in `finally`. CI covers Linux and macOS; report which platforms actually ran.
+Run `npm run check`, `npm run lint`, `npm test`, and relevant focused regressions. TypeScript formatting and linting are enforced with Biome (`biome.json`); apply `npm run format` before committing. Real integration tests must use private sockets and clean up in `finally`. CI covers Linux and macOS; report which platforms actually ran.

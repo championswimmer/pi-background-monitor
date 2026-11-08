@@ -22,4 +22,5 @@ jobs:
       - run: node --version && tmux -V
       - run: npm ci
       - run: npm run check
+      - run: npm run lint
       - run: npm test

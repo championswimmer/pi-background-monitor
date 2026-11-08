@@ -1,10 +1,16 @@
 /** Treat terminal content as untrusted; preserve only newlines and horizontal tabs. */
 export function sanitize(value: string): string {
-  return value.toWellFormed().replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)/g, "")
+  return value
+    .toWellFormed()
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)/g, "")
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
 }
-export function bounded(value: string, bytes = 16384, lines = 200): { text: string; truncated: boolean } {
+export function bounded(
+  value: string,
+  bytes = 16384,
+  lines = 200,
+): { text: string; truncated: boolean } {
   const clean = sanitize(value);
   const rows = clean.split("\n");
   const tail = rows.slice(-lines).join("\n");
