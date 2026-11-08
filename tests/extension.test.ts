@@ -758,11 +758,34 @@ test("settings dialog changes and saves session limits", async () => {
       component.handleInput("\t");
       assert.match(lines[0], /^╭─+╮$/);
       assert.match(lines.at(-1), /^╰─+╯$/);
+      for (const invalid of ["0", "65", "-1", "1.5"]) {
+        for (const char of invalid) component.handleInput(char);
+        component.handleInput("\r");
+        assert.match(component.render(50).join("\n"), /whole number from 1 to 64/);
+        assert.equal(
+          a.entries.filter((e: any) => e.customType === "pi-background-monitor:settings:v1").length,
+          0,
+        );
+        for (const _ of invalid) component.handleInput("\x7f");
+      }
+      component.handleInput("1");
+      component.handleInput("\r");
+      component.handleInput("\x1b[B");
+      component.handleInput("6");
+      component.handleInput("4");
       component.handleInput("\r");
     };
     await a.command("bgmon", "settings");
-    const entry = a.entries.find((e: any) => e.customType === "pi-background-monitor:settings:v1");
-    assert.deepEqual(entry.data.limits, { maxOpen: 1, maxTotal: 8 });
+    const entries = a.entries.filter(
+      (e: any) => e.customType === "pi-background-monitor:settings:v1",
+    );
+    assert.deepEqual(
+      entries.map((e: any) => e.data.limits),
+      [
+        { maxOpen: 1, maxTotal: 16 },
+        { maxOpen: 1, maxTotal: 64 },
+      ],
+    );
     const first = await a.call("bgmon_start", { command: "sleep 30" });
     assert.ok(first.id);
     assert.match((await a.call("bgmon_start", { command: "sleep 30" })).error, /Maximum 1 running/);

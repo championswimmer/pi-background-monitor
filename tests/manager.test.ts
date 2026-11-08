@@ -197,3 +197,29 @@ test("an active controller recovers if its metadata directory disappears", async
     await m.close();
   }
 });
+
+test("more than eight retained jobs survive recovery", async () => {
+  let locator: unknown;
+  let m = new Manager(
+    "many-jobs",
+    () => locator,
+    (x) => {
+      locator = x;
+    },
+  );
+  try {
+    for (let i = 0; i < 9; i++) await m.run(() => m.start("sleep 30", process.cwd()));
+    await m.close();
+    m = new Manager(
+      "many-jobs",
+      () => locator,
+      (x) => {
+        locator = x;
+      },
+    );
+    assert.equal((await m.run(() => m.jobs())).length, 9);
+  } finally {
+    await m.run(() => m.serverStop()).catch(() => {});
+    await m.close();
+  }
+});
