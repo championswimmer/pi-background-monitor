@@ -1,20 +1,11 @@
-import { type ExtensionContext, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
-import {
-  Container,
-  Key,
-  matchesKey,
-  SettingsList,
-  truncateToWidth,
-  visibleWidth,
-} from "@earendil-works/pi-tui";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Input, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type Limits, MAX_MONITORS } from "./limits.ts";
 import { sanitize } from "./output.ts";
 
-export type Limits = { maxOpen: number; maxTotal: number };
-export const DEFAULT_LIMITS: Limits = { maxOpen: 8, maxTotal: 8 };
-export function validLimits(value: unknown): value is Limits {
-  const v = value as Limits | null;
-  return !!v && [v.maxOpen, v.maxTotal].every((n) => Number.isInteger(n) && n >= 1 && n <= 8);
-}
+export type { Limits } from "./limits.ts";
+export { DEFAULT_LIMITS, validLimits } from "./limits.ts";
+
 type Job = { id: string; state: string; command?: string };
 type Watch = {
   job: string;
@@ -64,48 +55,38 @@ export async function dashboard(
   await ctx.ui.custom<void>((tui, theme, keys, done) => {
     let tab = initialTab;
     let selected = 0;
-    const values = Array.from({ length: 8 }, (_, i) => String(i + 1));
-    const container = new Container();
-    container.addChild({
-      render: () =>
-        (tui.terminal.rows || 24) < 15
-          ? [theme.fg("accent", theme.bold("Settings"))]
-          : [
-              theme.fg("accent", theme.bold("Settings")),
-              "",
-              "Limits apply to jobs owned by this session (hard maximum: 8).",
-              "Lowering a limit never stops or removes existing jobs.",
-              "",
-            ],
-      invalidate() {},
-    });
-    const list = new SettingsList(
-      [
-        {
-          id: "maxOpen",
-          label: "Maximum running monitors",
-          description: "New jobs are blocked when this many jobs are running. Default: 8.",
-          currentValue: String(limits.maxOpen),
-          values,
-        },
-        {
-          id: "maxTotal",
-          label: "Maximum retained monitors",
-          description:
-            "Includes finished, cancelled and lost jobs. Forget a job to free space. Default: 8.",
-          currentValue: String(limits.maxTotal),
-          values,
-        },
-      ],
-      5,
-      getSettingsListTheme(),
-      (id, value) => {
-        limits = { ...limits, [id]: Number(value) };
-        save(limits);
+    let setting = 0;
+    let error = "";
+    const fields = [
+      { id: "maxOpen", label: "Maximum running monitors", description: "Default: 8" },
+      {
+        id: "maxTotal",
+        label: "Maximum retained monitors",
+        description: "Default: 16; includes finished, cancelled and lost jobs",
       },
-      () => done(),
-    );
-    container.addChild(list);
+    ] as const;
+    const input = new Input({ prompt: "> ", placeholder: "Type a number" });
+    input.focused = true;
+    const clearInput = () => {
+      input.setValue("");
+      error = "";
+    };
+    const submit = () => {
+      const text = input.getValue();
+      const value = Number(text);
+      if (
+        !/^\d+$/.test(text) ||
+        !Number.isSafeInteger(value) ||
+        value < 1 ||
+        value > MAX_MONITORS
+      ) {
+        error = `Enter a whole number from 1 to ${MAX_MONITORS}.`;
+        return;
+      }
+      limits = { ...limits, [fields[setting].id]: value };
+      save(limits);
+      clearInput();
+    };
     return {
       render(width: number) {
         const tabLabel = (label: string, active: boolean) =>
@@ -118,11 +99,29 @@ export async function dashboard(
           "",
         ];
         if (tab === "settings") {
+          const compact = (tui.terminal.rows || 24) < 15;
           const lines = [
-            ...tabs,
-            ...container.render(Math.max(8, width - 2)),
-            "",
-            theme.fg("muted", "Tab switch · Esc close"),
+            ...tabs.slice(0, compact ? 2 : undefined),
+            ...(compact
+              ? []
+              : [
+                  theme.fg("accent", theme.bold("Settings")),
+                  theme.fg(
+                    "muted",
+                    `Session limits (1–${MAX_MONITORS}); lowering never removes jobs.`,
+                  ),
+                ]),
+            ...fields.flatMap((field, i) => [
+              theme.fg(
+                i === setting ? "accent" : "text",
+                `${i === setting ? "›" : " "} ${field.label}: ${limits[field.id]}`,
+              ),
+              ...(compact ? [] : [theme.fg("muted", `  ${field.description}`)]),
+            ]),
+            ...(compact ? [] : [""]),
+            ...input.render(Math.max(1, width - 2)),
+            ...(error ? [theme.fg("error", error)] : []),
+            theme.fg("muted", "↑/↓ select · type number · Enter save · Tab switch · Esc close"),
           ];
           return frame(lines, width, tui.terminal.rows || 24, (s) => theme.fg("border", s));
         }
@@ -168,8 +167,21 @@ export async function dashboard(
       handleInput(data: string) {
         if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab"))) {
           tab = tab === "list" ? "settings" : "list";
+          clearInput();
         } else if (tab === "settings") {
-          list.handleInput(data);
+          if (keys.matches(data, "tui.select.cancel") || matchesKey(data, Key.escape)) done();
+          else if (keys.matches(data, "tui.select.up") || matchesKey(data, Key.up)) {
+            setting = Math.max(0, setting - 1);
+            clearInput();
+          } else if (keys.matches(data, "tui.select.down") || matchesKey(data, Key.down)) {
+            setting = Math.min(fields.length - 1, setting + 1);
+            clearInput();
+          } else if (keys.matches(data, "tui.select.confirm") || matchesKey(data, Key.enter))
+            submit();
+          else {
+            input.handleInput(data);
+            error = "";
+          }
         } else if (
           keys.matches(data, "tui.select.cancel") ||
           keys.matches(data, "tui.select.confirm")
@@ -181,7 +193,7 @@ export async function dashboard(
         tui.requestRender();
       },
       invalidate() {
-        container.invalidate();
+        input.invalidate();
       },
     };
   }, overlay);

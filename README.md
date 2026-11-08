@@ -33,8 +33,8 @@ Agents have four focused tools:
 
 Watch add/update options: `label` (≤120 characters), `delivery` (`ui` default, `nextTurn`, or `wake`), `intervalSeconds` (1–300, default 5), `ttlSeconds` (1–1800, default 300; updates renew from now), and `once` (default true). Repeated watches need a state transition and a 10-second cooldown; exit watches always remove themselves.
 
-The settings limit running jobs and total retained jobs owned by the session independently (each defaults to 8 and can be set from 1 to 8). Lowering a limit does not stop or remove existing jobs. Retained jobs include finished, cancelled, and lost jobs; forget them to free space. Settings persist with the original session. The dashboard shows this session’s watch intervals and expiry times; watches are not job timeouts. Command previews are retained in the private registry and may contain secrets; old monitors may not have previews.
+The settings limit running jobs and total retained jobs owned by the session independently (defaults: 8 running and 16 retained; each can be set from 1 to 64 by typing a number and pressing Enter). Lowering a limit does not stop or remove existing jobs. Retained jobs include finished, cancelled, and lost jobs; forget them to free space. Settings persist with the original session. The dashboard shows this session’s watch intervals and expiry times; watches are not job timeouts. Command previews are retained in the private registry and may contain secrets; old monitors may not have previews.
 
-Hard limits: 8 jobs per owner, 64 indexed monitors and 128 owners per process, 8 watches per session and 64 watches total. Inspection output is bounded.
+Hard limits: 64 retained jobs per owner, 64 indexed monitors and 128 owners per process, 8 watches per session and 64 watches total. Inspection output is bounded.
 
 Recovery may fail after reboot, `/tmp` cleanup or socket loss; locks are never silently broken, and orphan cleanup is not automatic. `/tree` does not rewind processes. This is an early MVP, tested locally on Linux; macOS is covered by CI but has not been tested locally.

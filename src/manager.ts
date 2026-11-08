@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { lstat, mkdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { MAX_MONITORS } from "./limits.ts";
 import { bounded, quote, sanitize } from "./output.ts";
 import { checked, client, createDirectory, probe, Tmux } from "./tmux.ts";
 
@@ -116,7 +117,7 @@ export class Manager {
       if (
         !s.isFile() ||
         s.isSymbolicLink() ||
-        s.size > 262144 ||
+        s.size > 8 * 1024 * 1024 ||
         s.uid !== process.getuid?.() ||
         s.mode & 0o077
       )
@@ -128,7 +129,7 @@ export class Manager {
         data.dir !== locator.dir ||
         data.token !== locator.token ||
         !Array.isArray(data.jobs) ||
-        data.jobs.length > 8 ||
+        data.jobs.length > MAX_MONITORS ||
         data.jobs.some(
           (j) =>
             !validId(j.id) ||
@@ -185,7 +186,8 @@ export class Manager {
     await this.load(true);
     const d = this.data!,
       tm = this.tm!;
-    if (d.jobs.length >= 8) throw new Error("Maximum 8 retained jobs; forget a finished job first");
+    if (d.jobs.length >= MAX_MONITORS)
+      throw new Error(`Maximum ${MAX_MONITORS} retained jobs; forget a finished job first`);
     const exists = await this.verified();
     if (!exists && d.jobs.length)
       throw new Error(
