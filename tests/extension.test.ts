@@ -141,6 +141,7 @@ function runtime(session: string, entries: any[] = []) {
     tools,
     commands,
     notices,
+    ctx,
     command: (name: string, args: string) => commands.get(name).handler(args, ctx),
     start: () => events.get("session_start")({}, ctx),
     close: () => events.get("session_shutdown")({}, ctx),
@@ -612,6 +613,117 @@ test("bgmon interface validates action arguments and command routing", async () 
     assert.match(a.notices.at(-1)!, new RegExp(job.id));
     await a.command("bgmon", "stop-server");
     assert.match(a.notices.at(-1)!, /"stopped": true/);
+  } finally {
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("session monitor limits persist and never delete existing jobs", async () => {
+  const entries = [
+    {
+      type: "custom",
+      customType: "pi-background-monitor:settings:v1",
+      data: { session: "limits", limits: { maxOpen: 1, maxTotal: 2 } },
+    },
+  ];
+  const a = runtime("limits", entries);
+  await a.start();
+  try {
+    const first = await a.call("bgmon_start", { command: "sleep 30" });
+    assert.ok(first.id, JSON.stringify(first));
+    assert.match((await a.call("bgmon_start", { command: "exit 0" })).error, /Maximum 1 running/);
+    await a.call("bgmon_control", { action: "stop", id: first.id });
+    const second = await a.call("bgmon_start", { command: "exit 0" });
+    assert.ok(second.id, JSON.stringify(second));
+    assert.match((await a.call("bgmon_start", { command: "exit 0" })).error, /Maximum 2 retained/);
+    await a.close();
+    const b = runtime("limits", entries);
+    await b.start();
+    try {
+      assert.equal((await b.call("bgmon_inspect", {})).length, 2);
+      assert.match(
+        (await b.call("bgmon_start", { command: "exit 0" })).error,
+        /Maximum 2 retained/,
+      );
+    } finally {
+      await b.call("bgmon_control", { action: "server_stop" });
+      await b.close();
+    }
+  } finally {
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("dashboard displays sanitized command and watch information and completes subcommands", async () => {
+  const a = runtime("dashboard-test");
+  await a.start();
+  try {
+    const command = a.commands.get("bgmon");
+    assert.deepEqual(
+      command.getArgumentCompletions("").map((x: any) => x.value),
+      ["list", "settings", "stop-server"],
+    );
+    assert.deepEqual(
+      command.getArgumentCompletions("set").map((x: any) => x.value),
+      ["settings"],
+    );
+    assert.equal(command.getArgumentCompletions("unknown"), null);
+    const job = await a.call("bgmon_start", { command: "sleep 30 # dashboard example" });
+    assert.ok(job.id);
+    await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "exit",
+      intervalSeconds: 17,
+      ttlSeconds: 90,
+    });
+    let output: string[] = [];
+    a.ctx.hasUI = true;
+    a.ctx.mode = "tui";
+    a.ctx.ui.custom = async (factory: any) => {
+      const component = factory(
+        { terminal: { rows: 24 }, requestRender() {} },
+        { fg: (_: any, text: string) => text, bold: (text: string) => text },
+        { matches: () => false },
+        () => {},
+      );
+      output = component.render(120);
+    };
+    await a.command("bgmon", "");
+    assert.match(output.join("\n"), /sleep 30 # dashboard example/);
+    assert.match(output.join("\n"), /every 17s.*expires/);
+    assert.match(output.join("\n"), new RegExp(job.id));
+  } finally {
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("settings dialog changes and saves session limits", async () => {
+  const { initTheme } = await import("@earendil-works/pi-coding-agent");
+  initTheme("dark", false);
+  const a = runtime("settings-dialog");
+  await a.start();
+  try {
+    a.ctx.hasUI = true;
+    a.ctx.mode = "tui";
+    a.ctx.ui.custom = async (factory: any) => {
+      const component = factory(
+        { requestRender() {} },
+        { fg: (_: any, value: string) => value, bold: (value: string) => value },
+        {},
+        () => {},
+      );
+      component.handleInput("\r");
+    };
+    await a.command("bgmon", "settings");
+    const entry = a.entries.find((e: any) => e.customType === "pi-background-monitor:settings:v1");
+    assert.deepEqual(entry.data.limits, { maxOpen: 1, maxTotal: 8 });
+    const first = await a.call("bgmon_start", { command: "sleep 30" });
+    assert.ok(first.id);
+    assert.match((await a.call("bgmon_start", { command: "sleep 30" })).error, /Maximum 1 running/);
   } finally {
     await a.call("bgmon_control", { action: "server_stop" });
     await a.close();

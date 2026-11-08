@@ -14,7 +14,7 @@ Reload Pi after installation. For a local checkout use `pi install ./pi-backgrou
 
 ## Use
 
-Ask Pi to start, inspect, stop, or watch a background task. `/bgmon` shows monitors; `/bgmon stop-server` stops all jobs in your session's server. `bgmon_control` can instead stop **all jobs in a monitor's owning server**. There are currently no settings.
+Ask Pi to start, inspect, stop, or watch a background task. `/bgmon` opens a monitor dashboard; `/bgmon settings` configures session limits, and `/bgmon stop-server` stops all jobs in your session's server. `bgmon_control` can instead stop **all jobs in a monitor's owning server**.
 
 Every job has a monitor identity. Extension instances in the same JavaScript process share an in-memory index: any can list, inspect, or stop an indexed monitor, and multiple sessions can independently watch it. Each session manages only its own watches. To receive notifications in a child session, that session must load the extension locally; an inherited tool bridge executes in its host session and its watches notify the host instead. Separate processes and worker threads do not share this index. On last session shutdown the index is dropped and jobs detach; only the original Pi session can recover its jobs from its saved locator. New or forked sessions cannot recover them from disk.
 
@@ -33,6 +33,8 @@ Agents have four focused tools:
 
 Watch add/update options: `label` (≤120 characters), `delivery` (`ui` default, `nextTurn`, or `wake`), `intervalSeconds` (1–300, default 5), `ttlSeconds` (1–1800, default 300; updates renew from now), and `once` (default true). Repeated watches need a state transition and a 10-second cooldown; exit watches always remove themselves.
 
-Limits: 8 jobs per owner, 64 indexed monitors and 128 owners per process, 8 watches per session and 64 watches total. Inspection output is bounded.
+The settings limit running jobs and total retained jobs owned by the session independently (each defaults to 8 and can be set from 1 to 8). Lowering a limit does not stop or remove existing jobs. Retained jobs include finished, cancelled, and lost jobs; forget them to free space. Settings persist with the original session. The dashboard shows this session’s watch intervals and expiry times; watches are not job timeouts. Command previews are retained in the private registry and may contain secrets; old monitors may not have previews.
+
+Hard limits: 8 jobs per owner, 64 indexed monitors and 128 owners per process, 8 watches per session and 64 watches total. Inspection output is bounded.
 
 Recovery may fail after reboot, `/tmp` cleanup or socket loss; locks are never silently broken, and orphan cleanup is not automatic. `/tree` does not rewind processes. This is an early MVP, tested locally on Linux; macOS is covered by CI but has not been tested locally.

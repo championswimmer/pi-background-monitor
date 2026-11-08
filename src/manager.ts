@@ -1,13 +1,14 @@
 import { randomBytes } from "node:crypto";
 import { lstat, mkdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { bounded, quote } from "./output.ts";
+import { bounded, quote, sanitize } from "./output.ts";
 import { checked, client, createDirectory, probe, Tmux } from "./tmux.ts";
 
 type Job = {
   id: string;
   pane?: string;
   created: string;
+  command?: string;
   cancelled?: boolean;
   finalOutput?: { text: string; truncated: boolean };
 };
@@ -131,6 +132,8 @@ export class Manager {
         data.jobs.some(
           (j) =>
             !validId(j.id) ||
+            (j.command !== undefined &&
+              (typeof j.command !== "string" || j.command.length > 512)) ||
             (j.pane !== undefined && !/^%\d+$/.test(j.pane)) ||
             (j.finalOutput !== undefined &&
               (typeof j.finalOutput.text !== "string" ||
@@ -188,7 +191,11 @@ export class Manager {
       throw new Error(
         "Server is missing; jobs lost. Stop the server record before starting again.",
       );
-    const job: Job = { id: id(), created: new Date().toISOString() };
+    const job: Job = {
+      id: id(),
+      created: new Date().toISOString(),
+      command: sanitize(command).replace(/\s+/g, " ").slice(0, 512),
+    };
     const script = join(d.dir, `${job.id}.sh`);
     await writeFile(script, command, { mode: 0o600, flag: "wx" });
     d.jobs.push(job);
@@ -221,6 +228,7 @@ export class Manager {
       this.data.jobs.map(async (j) => ({
         id: j.id,
         created: j.created,
+        command: j.command,
         ...(j.cancelled
           ? { state: "cancelled" }
           : available && j.pane

@@ -1,10 +1,13 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { type Binding, broker, type Delivery } from "./broker.ts";
+import { DEFAULT_LIMITS, dashboard, type Limits, settingsDialog, validLimits } from "./ui.ts";
 
 const ENTRY = "pi-background-monitor:locator:v1";
+const SETTINGS = "pi-background-monitor:settings:v1";
 export default function extension(pi: ExtensionAPI) {
   let binding: Binding | undefined;
+  let limits: Limits = { ...DEFAULT_LIMITS };
   let pending: { text: string; delivery: Delivery }[] = [];
   let dropped = 0;
   let lastMessage = 0;
@@ -42,8 +45,16 @@ export default function extension(pi: ExtensionAPI) {
   }
   function create(ctx: ExtensionContext) {
     const session = ctx.sessionManager.getSessionId();
+    limits = { ...DEFAULT_LIMITS };
+    for (const e of ctx.sessionManager.getEntries()) {
+      if (e.type === "custom" && e.customType === SETTINGS) {
+        const data = e.data as { session?: string; limits?: unknown } | undefined;
+        if (data?.session === session && validLimits(data.limits)) limits = { ...data.limits };
+      }
+    }
     const current: Binding = {
       session,
+      limits: () => limits,
       active: true,
       locate: () => {
         const entries = ctx.sessionManager.getEntries();
@@ -244,17 +255,48 @@ export default function extension(pi: ExtensionAPI) {
     if (old) await broker.leave(old);
   });
   pi.registerCommand("bgmon", {
-    description: "Show shared monitors; /bgmon stop-server stops your session's server",
+    description: "Show monitors, configure settings, or stop your session's server",
+    getArgumentCompletions: (prefix) => {
+      const values = ["list", "settings", "stop-server"].filter((value) =>
+        value.startsWith(prefix.trimStart()),
+      );
+      return values.length ? values.map((value) => ({ value, label: value })) : null;
+    },
     handler: async (args, ctx) => {
       const command = args.trim();
-      if (command && command !== "list" && command !== "stop-server") {
-        ctx.ui.notify("Usage: /bgmon [list | stop-server]", "info");
+      if (command && command !== "list" && command !== "settings" && command !== "stop-server") {
+        ctx.ui.notify("Usage: /bgmon [list | settings | stop-server]", "info");
         return;
       }
-      const r = await run(() =>
-        broker.action(get(), command === "stop-server" ? "server_stop" : "list", {}),
-      );
-      ctx.ui.notify(r.content[0].text, "info");
+      if (command === "settings") {
+        if (!ctx.hasUI || ctx.mode !== "tui") {
+          ctx.ui.notify("/bgmon settings requires TUI mode", "error");
+          return;
+        }
+        const current = get();
+        await settingsDialog(ctx, limits, (value) => {
+          if (!current.active || current !== binding) return;
+          limits = value;
+          pi.appendEntry(SETTINGS, { session: current.session, limits });
+        });
+        return;
+      }
+      if (command === "stop-server") {
+        const r = await run(() => broker.action(get(), "server_stop", {}));
+        ctx.ui.notify(r.content[0].text, "info");
+        return;
+      }
+      const r = await run(() => broker.action(get(), "list", {}));
+      if (!ctx.hasUI || ctx.mode !== "tui" || !Array.isArray(r.details)) {
+        ctx.ui.notify(r.content[0].text, "info");
+        return;
+      }
+      const w = await run(() => broker.action(get(), "watches", {}));
+      if (!Array.isArray(w.details)) {
+        ctx.ui.notify(w.content[0].text, "error");
+        return;
+      }
+      await dashboard(ctx, r.details, w.details);
     },
   });
 }

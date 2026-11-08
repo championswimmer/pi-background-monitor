@@ -9,6 +9,7 @@ type Binding = {
   locate: () => unknown;
   persist: (x: unknown) => void;
   notify: (text: string, delivery: Delivery) => void;
+  limits: () => { maxOpen: number; maxTotal: number };
 };
 type Owner = { manager: Manager; binding?: Binding };
 type Watch = {
@@ -138,6 +139,12 @@ class Broker {
     return this.run(async () => {
       const owner = await this.recover(binding);
       if (this.monitors.size >= 64) throw new Error("Maximum 64 shared monitors");
+      const jobs = await owner.manager.run(() => owner.manager.jobs());
+      const limits = binding.limits();
+      if (jobs.length >= limits.maxTotal)
+        throw new Error(`Maximum ${limits.maxTotal} retained jobs; forget a finished job first`);
+      if (jobs.filter((job) => job.state === "running").length >= limits.maxOpen)
+        throw new Error(`Maximum ${limits.maxOpen} running jobs`);
       const result = await owner.manager.run(() => owner.manager.start(command, cwd));
       this.monitors.set(result.id, owner);
       return result;
