@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { bounded, quote } from "./output.ts";
 import { checked, client, createDirectory, probe, Tmux } from "./tmux.ts";
 
-type Job = { id: string; pane?: string; created: string; cancelled?: boolean };
+type Job = { id: string; pane?: string; created: string; cancelled?: boolean; finalOutput?: { text: string; truncated: boolean } };
 type Locator = { session: string; dir: string; token: string };
 type Registry = Locator & { version: 1; jobs: Job[] };
 const id = () => randomBytes(12).toString("hex");
@@ -34,7 +34,7 @@ export class Manager {
     try {
       const path = join(locator.dir, "registry.json"), s = await lstat(path); if (!s.isFile() || s.isSymbolicLink() || s.size > 262144 || s.uid !== process.getuid?.() || (s.mode & 0o077)) throw new Error("Unsafe registry");
       const data = JSON.parse(await readFile(path, "utf8")) as Registry;
-      if (data.version !== 1 || !validLocator(data, this.session) || data.dir !== locator.dir || data.token !== locator.token || !Array.isArray(data.jobs) || data.jobs.length > 8 || data.jobs.some(j => !validId(j.id) || (j.pane !== undefined && !/^%\d+$/.test(j.pane)))) throw new Error("Invalid registry");
+      if (data.version !== 1 || !validLocator(data, this.session) || data.dir !== locator.dir || data.token !== locator.token || !Array.isArray(data.jobs) || data.jobs.length > 8 || data.jobs.some(j => !validId(j.id) || (j.pane !== undefined && !/^%\d+$/.test(j.pane)) || (j.finalOutput !== undefined && (typeof j.finalOutput.text !== "string" || Buffer.byteLength(j.finalOutput.text) > 16384 || typeof j.finalOutput.truncated !== "boolean")))) throw new Error("Invalid registry");
       this.data = data; this.tm = new Tmux(join(data.dir, "s"), data.dir, data.token);
       const socket = await lstat(this.tm.socket).catch(() => undefined); if (socket) { if (!socket.isSocket() || socket.uid !== process.getuid?.()) throw new Error("Unsafe tmux socket"); await this.tm.verify(); }
     } catch (e) { this.data = undefined; this.tm = undefined; await rm(join(locator.dir, "lock"), { recursive: true, force: true }); this.locked = false; throw e; }
@@ -54,8 +54,8 @@ export class Manager {
     return { id: job.id, state: "running", socket: tm.socket, attach: `tmux -S ${quote(tm.socket)} attach -t jobs`, note: "Job survives Pi shutdown; explicitly stop it or the server." };
   }
   async jobs() { await this.load(false); if (!this.data) return []; const available = await this.verified(); return Promise.all(this.data.jobs.map(async j => ({ id: j.id, created: j.created, ...(j.cancelled ? { state: "cancelled" } : available && j.pane ? await this.tm!.status(j.pane) : { state: "lost" }) }))); }
-  async inspect(jobId: string) { await this.load(false); const j = this.find(jobId); if (!j.pane || !await this.verified()) return { id: j.id, state: "lost" }; const status = j.cancelled ? { state: "cancelled" } : await this.tm!.status(j.pane); const r = await this.tm!.capture(j.pane); return { id: j.id, ...status, timestamp: new Date().toISOString(), untrustedOutput: bounded(r.stdout), clientTruncated: r.truncated }; }
-  async stop(jobId: string) { await this.load(false); const j = this.find(jobId); if (j.pane && await this.verified() && (await this.tm!.status(j.pane)).state === "running") { await checked(this.tm!.args("send-keys", "-t", j.pane, "C-c")); await new Promise(r => setTimeout(r, 2000)); if ((await this.tm!.status(j.pane)).state === "running") await client(this.tm!.args("kill-pane", "-t", j.pane)); j.cancelled = true; await this.save(); } return { id: j.id, state: j.cancelled ? "cancelled" : "not-running" }; }
+  async inspect(jobId: string) { await this.load(false); const j = this.find(jobId); if (j.cancelled) return { id: j.id, state: "cancelled", timestamp: new Date().toISOString(), untrustedOutput: j.finalOutput ?? { text: "", truncated: false }, clientTruncated: false }; if (!j.pane || !await this.verified()) return { id: j.id, state: "lost" }; const status = j.cancelled ? { state: "cancelled" } : await this.tm!.status(j.pane); const r = await this.tm!.capture(j.pane); return { id: j.id, ...status, timestamp: new Date().toISOString(), untrustedOutput: bounded(r.stdout), clientTruncated: r.truncated }; }
+  async stop(jobId: string) { await this.load(false); const j = this.find(jobId); if (j.pane && await this.verified() && (await this.tm!.status(j.pane)).state === "running") { try { j.finalOutput = bounded((await this.tm!.capture(j.pane)).stdout); } catch { /* pane may exit during cancellation */ } await checked(this.tm!.args("send-keys", "-t", j.pane, "C-c")); await new Promise(r => setTimeout(r, 2000)); if ((await this.tm!.status(j.pane)).state === "running") await client(this.tm!.args("kill-pane", "-t", j.pane)); j.cancelled = true; await this.save(); } return { id: j.id, state: j.cancelled ? "cancelled" : "not-running" }; }
   async forget(jobId: string) { await this.load(false); const j = this.find(jobId); if (j.pane && await this.verified()) { if ((await this.tm!.status(j.pane)).state === "running") throw new Error("Stop running job before forgetting it"); await client(this.tm!.args("kill-pane", "-t", j.pane)); } this.data!.jobs = this.data!.jobs.filter(x => x !== j); await this.save(); await unlink(join(this.data!.dir, `${j.id}.sh`)).catch(() => {}); return { forgotten: jobId }; }
   async serverStop() { await this.load(false); if (!this.data) return { stopped: false }; if (await this.verified()) await checked(this.tm!.args("kill-server")); const dir = this.data.dir; this.data = undefined; this.tm = undefined; this.locked = false; await rm(dir, { recursive: true, force: true }); this.persist(null); return { stopped: true }; }
 }

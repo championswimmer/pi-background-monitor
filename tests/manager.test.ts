@@ -15,6 +15,7 @@ test("jobs detach, recover for the same session, and stop only owned server", as
     await m.close(); m = new Manager("test-session", () => locator, x => { locator = x; });
     assert.equal((await m.run(() => m.jobs())).length, 1);
     assert.equal((await m.run(() => m.stop(start.id))).state, "cancelled");
+    const final = await m.run(() => m.inspect(start.id)); assert.equal(final.state, "cancelled"); assert.ok("untrustedOutput" in final); assert.match(final.untrustedOutput!.text, /READY/);
     assert.equal((await m.run(() => m.forget(start.id))).forgotten, start.id);
     assert.equal((await m.run(() => m.serverStop())).stopped, true);
     assert.equal(locator, null);
