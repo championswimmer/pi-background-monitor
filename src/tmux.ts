@@ -40,7 +40,7 @@ export async function createDirectory(): Promise<{ dir: string; socket: string; 
 export class Tmux {
   constructor(readonly socket: string, readonly dir: string, readonly token: string) {}
   args(...args: string[]) { return ["-S", this.socket, ...args]; }
-  async verify() { const r = await checked(this.args("show-options", "-gv", "@pbm_owner")); if (r.stdout.trim() !== this.token) throw new Error("tmux owner mismatch; refusing operation"); }
+  async verify(): Promise<boolean> { const r = await client(this.args("show-options", "-gv", "@pbm_owner")); if (r.code !== 0) { if (/no server running|error connecting to .*\(No such file or directory\)|error connecting to .*\(Connection refused\)/i.test(r.stderr)) return false; throw new Error(`tmux owner verification failed: ${r.stderr.trim()}`); } if (r.stdout.trim() !== this.token) throw new Error("tmux owner mismatch; refusing operation"); return true; }
   async start(script: string, cwd: string, first: boolean): Promise<string> {
     const args = first ? ["-f", join(this.dir, "tmux.conf"), "new-session", "-d", "-s", "jobs", "-n", "job", "-x", "120", "-y", "40", "-c", cwd, "-P", "-F", "#{pane_id}"] : ["new-window", "-d", "-t", "jobs:", "-c", cwd, "-P", "-F", "#{pane_id}"];
     const r = await checked(this.args(...args, "/bin/bash", "--noprofile", "--norc", script));
