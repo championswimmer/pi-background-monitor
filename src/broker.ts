@@ -295,7 +295,7 @@ class Broker {
             if (triggered && now - w.last >= 10000) {
               w.last = now;
               w.subscriber.notify(
-                `Background watch ${w.id} job ${w.job}: ${w.kind}, ${state}${w.label ? `, label: ${w.label}` : ""} (${new Date().toISOString()})`,
+                `bgmon watch ${w.id} job ${w.job}: ${w.kind}, ${state}${w.label ? `, label: ${w.label}` : ""} (${new Date().toISOString()})`,
                 w.delivery,
               );
               if (w.once || w.kind === "exit") this.watches.delete(w.id);

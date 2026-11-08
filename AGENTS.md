@@ -9,6 +9,10 @@
 - Read the installed Pi extension docs and relevant examples before changing integration or lifecycle behavior.
 - The original research and MVP plan are in `.agents/plans/`; they are aspirational where they differ from implementation.
 
+## Interface conventions
+
+- Tools use the `bgmon_` prefix; slash commands live under `/bgmon`. There are no settings yet. If settings are added, they must open via `/bgmon`.
+
 ## Architecture and invariants
 
 - `src/index.ts` owns Pi tools, session lifecycle and per-session notification delivery; `src/broker.ts` owns the process-wide monitor index and watches; `src/manager.ts` serializes job operations and manages recovery and the registry; `src/tmux.ts` wraps the tmux client; `src/output.ts` bounds and sanitizes output.

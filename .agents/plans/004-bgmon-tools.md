@@ -18,11 +18,12 @@ registerCommand sections and `examples/extensions/commands.ts`.
 ## Phases
 
 - [x] Inspect current integration, tests, planning skill and Pi API documentation.
-- [ ] Implement four tool declarations, action validation and `/bgmon` command.
-- [ ] Migrate real integration tests and add schema/validation/command regressions.
-- [ ] Update concise README reference and future settings convention in AGENTS.md.
-- [ ] Run format, typecheck, lint, tests, whitespace and package dry-run on Linux.
-- [ ] Independent review, fix findings, commit and push implementation.
+- [x] Implement four tool declarations, action validation and `/bgmon` command.
+- [x] Migrate real integration tests and add schema/validation/command regressions.
+- [x] Update concise README reference and future settings convention in AGENTS.md.
+- [x] Run format, typecheck, lint, tests, whitespace and package dry-run on Linux.
+- [x] Independent review; no demonstrated correctness/security findings.
+- [x] Commit and push implementation.
 
 ## Risks and checks
 
@@ -32,3 +33,15 @@ sharing tests. Shell execution remains explicit and separately permissioned. Lin
 checks do not verify macOS. Implementation touches `src/index.ts`,
 `tests/extension.test.ts`, `README.md`, and `AGENTS.md`; notification wording may
 also change in `src/broker.ts` without altering durable keys.
+
+## Verification log
+
+Linux: format, typecheck, lint (nonfatal warnings), all 19 tests, diff check and
+package dry-run pass. Initial suite hit an existing fixed-time watch race; bounded
+polling now awaits the actual notification before asserting. Review is pending.
+
+Independent reviewer `/root/bgmon-interface/review-interface` found no demonstrated
+correctness or security defects. Architect independently reran check, lint, all 19
+tests, diff check and package dry-run successfully on Linux. Lint warnings remain;
+macOS was not tested locally. The initial timing failure and bounded-polling fix
+are recorded above.

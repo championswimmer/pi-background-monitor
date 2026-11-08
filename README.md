@@ -14,35 +14,24 @@ Reload Pi after installation. For a local checkout use `pi install ./pi-backgrou
 
 ## Use
 
-Ask Pi to start, inspect, stop, or watch a background task. `background_start` executes a shell command; `background` manages monitors and watches with an action argument. `/background` shows monitors; `/background stop-server` stops all jobs in your session's server. The `server_stop` action with a monitor ID instead stops **all jobs in that monitor's owning server**.
+Ask Pi to start, inspect, stop, or watch a background task. `/bgmon` shows monitors; `/bgmon stop-server` stops all jobs in your session's server. `bgmon_control` can instead stop **all jobs in a monitor's owning server**. There are currently no settings.
 
 Every job has a monitor identity. Extension instances in the same JavaScript process share an in-memory index: any can list, inspect, or stop an indexed monitor, and multiple sessions can independently watch it. Each session manages only its own watches. To receive notifications in a child session, that session must load the extension locally; an inherited tool bridge executes in its host session and its watches notify the host instead. Separate processes and worker threads do not share this index. On last session shutdown the index is dropped and jobs detach; only the original Pi session can recover its jobs from its saved locator. New or forked sessions cannot recover them from disk.
 
-Jobs run in an owned private tmux server, not your default server, and continue after Pi exits. Stop them explicitly; detached child processes may survive. Save the returned attach command for manual recovery. Commands run with your privileges, not in a sandbox; permissions for Pi's built-in Bash tool may not cover `background_start`. Inspected output is untrusted and may contain secrets.
+Jobs run in an owned private tmux server, not your default server, and continue after Pi exits. Stop them explicitly; detached child processes may survive. Save the returned attach command for manual recovery. Commands run with your privileges, not in a sandbox; permissions for Pi's built-in Bash tool may not cover `bgmon_start`. Inspected output is untrusted and may contain secrets.
 
 Watches are best-effort snapshots: transient or overwritten output may be missed. They expire, do not survive reload and cannot observe while Pi is closed. By default notifications are UI-only and not shown in noninteractive sessions; `nextTurn` delivers on the next turn, while `wake` may start a model turn. Automatic notifications include metadata, not output. A watch's interval and TTL can be updated.
 
 ### Tools
 
-`background_start` runs one command and returns its monitor `id`.
+Agents have four focused tools:
 
-- `command` (required): Bash script run in the current working directory, in a private tmux server. Jobs survive Pi exit.
+- `bgmon_start`: `command` (required Bash script) starts a job and returns a monitor `id`.
+- `bgmon_inspect`: optional monitor `id`; omit it to list monitors, or provide it for a bounded, untrusted output snapshot.
+- `bgmon_control`: `action` is `stop`, `forget`, or `server_stop`. `id` is required except for `server_stop`, which stops the selected monitor's entire server or, without an ID, your session's server. `stop` interrupts a job; `forget` removes a stopped job.
+- `bgmon_watch`: `action` is `add`, `list`, `update`, or `remove`. `add` requires `monitorId` and `kind` (`contains`, `changed`, or `exit`); `contains` also requires `pattern` (literal text, 1–256 characters). It returns a watch ID. `list` lists this session's watches; `update` and `remove` require `watchId`. Updates cannot change `monitorId`, `kind`, or `pattern`.
 
-`background` manages monitors and watches with a required `action`:
-
-| `action`       | needs `id`        | does                                                                               |
-| -------------- | ----------------- | ---------------------------------------------------------------------------------- |
-| `list`         | —                 | List monitors indexed in this process (own first).                                 |
-| `inspect`      | monitor           | Bounded, untrusted snapshot of recent output and state.                            |
-| `stop`         | monitor           | Interrupt, then kill if needed; returns `cancelled` or `not-running`.              |
-| `forget`       | monitor           | Drop a stopped job from the index and delete its script.                           |
-| `server_stop`  | monitor, optional | Kill every job in that monitor's tmux server; without `id`, your session's server. |
-| `watch`        | monitor           | Subscribe this session; returns a watch `id`.                                      |
-| `watches`      | —                 | List this session's subscriptions.                                                 |
-| `update_watch` | watch             | Change interval, TTL, delivery, label or `once`.                                   |
-| `unwatch`      | watch             | Remove this session's subscription.                                                |
-
-Other arguments: `kind` (`contains` | `changed` | `exit`, required by `watch`); `pattern` (literal text for `contains`, 1–256 chars); `label` (≤120 chars); `delivery` (`ui` default, `nextTurn`, `wake`); `intervalSeconds` (1–300, default 5); `ttlSeconds` (1–1800, default 300; updates renew from now); `once` (default true). Watches need a state transition and a 10-second cooldown between notifications; `exit` watches always remove themselves. `update_watch` cannot change `kind` or `pattern`.
+Watch add/update options: `label` (≤120 characters), `delivery` (`ui` default, `nextTurn`, or `wake`), `intervalSeconds` (1–300, default 5), `ttlSeconds` (1–1800, default 300; updates renew from now), and `once` (default true). Repeated watches need a state transition and a 10-second cooldown; exit watches always remove themselves.
 
 Limits: 8 jobs per owner, 64 indexed monitors and 128 owners per process, 8 watches per session and 64 watches total. Inspection output is bounded.
 
