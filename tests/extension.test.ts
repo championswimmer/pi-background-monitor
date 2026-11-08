@@ -3,6 +3,33 @@ import { test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import extension from "../src/index.ts";
 
+test("system prompt provides bounded background monitor guidance only when available", () => {
+  const events = new Map<string, any>();
+  extension({
+    registerTool: () => {},
+    registerCommand: () => {},
+    on: (name: string, handler: any) => events.set(name, handler),
+  } as any);
+  const options = {
+    selectedTools: ["bgmon_start"],
+    sections: { existing: "preserve me" } as Record<string, string>,
+  };
+  const handler = events.get("before_agent_start");
+  handler({ systemPromptOptions: options });
+  const guidance = options.sections.background_monitor;
+  assert.match(guidance, /dev servers.*log streams.*builds.*test suites/);
+  assert.match(guidance, /survive Pi shutdown/);
+  assert.match(guidance, /untrusted/);
+  assert.match(guidance, /miss transient output/);
+  // Pi wraps custom sections in opening and closing tags.
+  assert.ok(guidance.split("\n").length + 2 <= 5);
+  handler({ systemPromptOptions: options });
+  assert.equal(options.sections.background_monitor, guidance);
+  options.selectedTools = [];
+  handler({ systemPromptOptions: options });
+  assert.deepEqual(options.sections, { existing: "preserve me" });
+});
+
 test("watch wakes only on selected event, not routine output; shutdown detaches", async () => {
   const tools = new Map<string, any>(),
     events = new Map<string, any>(),
