@@ -119,11 +119,17 @@ export default function extension(pi: ExtensionAPI) {
       command: Type.String({
         description: "Bash script to execute in the current working directory.",
       }),
+      id: Type.Optional(
+        Type.String({
+          description:
+            "Optional unique ID (1–64 letters, digits, _ or -; no 24 lowercase hex); generated if omitted.",
+        }),
+      ),
     }),
     execute: async (_id, p, _s, _u, ctx) =>
       run(async () => {
-        fields(p, ["command"]);
-        return broker.start(get(), p.command, ctx.cwd);
+        fields(p, ["command", "id"]);
+        return broker.start(get(), p.command, ctx.cwd, p.id);
       }),
   });
   pi.registerTool({

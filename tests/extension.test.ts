@@ -559,7 +559,10 @@ test("bgmon interface validates action arguments and command routing", async () 
       ["bgmon_start", "bgmon_inspect", "bgmon_control", "bgmon_watch"],
     );
     assert.deepEqual([...a.commands.keys()], ["bgmon"]);
-    assert.deepEqual(Object.keys(a.tools.get("bgmon_start").parameters.properties), ["command"]);
+    assert.deepEqual(Object.keys(a.tools.get("bgmon_start").parameters.properties), [
+      "command",
+      "id",
+    ]);
     assert.deepEqual(Object.keys(a.tools.get("bgmon_inspect").parameters.properties), ["id"]);
     assert.deepEqual(Object.keys(a.tools.get("bgmon_control").parameters.properties), [
       "action",
@@ -796,55 +799,61 @@ test("settings remain accessible when monitor data cannot be loaded", async () =
   await dashboard(ctx, [], [], DEFAULT_LIMITS, () => {}, "settings", "monitor data unavailable");
 });
 
-test("dashboard output uses the same inspection path without controlling the job", async () => {
-  const { initTheme } = await import("@earendil-works/pi-coding-agent");
-  initTheme("dark", false);
-  const a = runtime("dashboard-output");
-  await a.start();
-  try {
-    const job = await a.call("bgmon_start", { command: "echo VIEWER_SNAPSHOT_MARKER; sleep 30" });
-    assert.ok(job.id);
-    a.ctx.hasUI = true;
-    a.ctx.mode = "tui";
-    a.ctx.ui.custom = async (factory: any) => {
-      let closed = false;
-      const component = factory(
-        { terminal: { rows: 24 }, requestRender() {} },
-        {
-          fg: (_: string, value: string) => value,
-          bg: (_: string, value: string) => value,
-          bold: (value: string) => value,
-        },
-        { matches: (data: string, key: string) => data === key },
-        () => {
-          closed = true;
-        },
-      );
-      component.handleInput("tui.select.confirm");
-      const deadline = Date.now() + 5000;
-      while (
-        !component.render(80).join("\n").includes("VIEWER_SNAPSHOT_MARKER") &&
-        Date.now() < deadline
-      )
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      const rendered = component.render(80).join("\n");
-      const inspection = await a.call("bgmon_inspect", { id: job.id });
-      assert.match(rendered, /VIEWER_SNAPSHOT_MARKER/);
-      assert.match(inspection.untrustedOutput.text, /VIEWER_SNAPSHOT_MARKER/);
-      component.handleInput("tui.select.cancel");
-      assert.equal(closed, false);
-      assert.match(component.render(80).join("\n"), /Selected monitor/);
-      component.handleInput("tui.select.cancel");
-      assert.equal(closed, true);
-      component.dispose();
-    };
-    await a.command("bgmon", "list");
-    assert.equal((await a.call("bgmon_inspect", { id: job.id })).state, "running");
-  } finally {
-    await a.call("bgmon_control", { action: "server_stop" });
-    await a.close();
-  }
-});
+for (const id of [undefined, "viewer-test"]) {
+  test(`dashboard output uses the same inspection path without controlling the ${id ? "named" : "generated"} job`, async () => {
+    const { initTheme } = await import("@earendil-works/pi-coding-agent");
+    initTheme("dark", false);
+    const a = runtime(`dashboard-output-${id ?? "generated"}`);
+    await a.start();
+    try {
+      const job = await a.call("bgmon_start", {
+        command: "echo VIEWER_SNAPSHOT_MARKER; sleep 30",
+        ...(id ? { id } : {}),
+      });
+      assert.ok(job.id);
+      if (id) assert.equal(job.id, id);
+      a.ctx.hasUI = true;
+      a.ctx.mode = "tui";
+      a.ctx.ui.custom = async (factory: any) => {
+        let closed = false;
+        const component = factory(
+          { terminal: { rows: 24 }, requestRender() {} },
+          {
+            fg: (_: string, value: string) => value,
+            bg: (_: string, value: string) => value,
+            bold: (value: string) => value,
+          },
+          { matches: (data: string, key: string) => data === key },
+          () => {
+            closed = true;
+          },
+        );
+        component.handleInput("tui.select.confirm");
+        const deadline = Date.now() + 5000;
+        while (
+          !component.render(80).join("\n").includes("VIEWER_SNAPSHOT_MARKER") &&
+          Date.now() < deadline
+        )
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        const rendered = component.render(80).join("\n");
+        const inspection = await a.call("bgmon_inspect", { id: job.id });
+        assert.match(rendered, /VIEWER_SNAPSHOT_MARKER/);
+        assert.match(inspection.untrustedOutput.text, /VIEWER_SNAPSHOT_MARKER/);
+        component.handleInput("tui.select.cancel");
+        assert.equal(closed, false);
+        assert.match(component.render(80).join("\n"), /Selected monitor/);
+        component.handleInput("tui.select.cancel");
+        assert.equal(closed, true);
+        component.dispose();
+      };
+      await a.command("bgmon", "list");
+      assert.equal((await a.call("bgmon_inspect", { id: job.id })).state, "running");
+    } finally {
+      await a.call("bgmon_control", { action: "server_stop" });
+      await a.close();
+    }
+  });
+}
 
 test("session shutdown closes an open output view and leaves the job detached", async () => {
   const { initTheme } = await import("@earendil-works/pi-coding-agent");
@@ -890,5 +899,84 @@ test("session shutdown closes an open output view and leaves the job detached", 
     await recovered.call("bgmon_control", { action: "server_stop" });
     await recovered.close();
     await a.close();
+  }
+});
+
+test("custom monitor IDs are shared, unique, safe, and recoverable", async () => {
+  const a = runtime("named-owner"),
+    b = runtime("named-other");
+  await a.start();
+  await b.start();
+  try {
+    for (const id of ["", "  ", "../evil", "bad\nname", "a".repeat(65)])
+      assert.match(
+        (await a.call("bgmon_start", { command: "exit 0", id })).error,
+        /Invalid job ID/,
+      );
+    const named = await a.call("bgmon_start", { command: "sleep 30", id: "build-api_1" });
+    assert.equal(named.id, "build-api_1", JSON.stringify(named));
+    assert.match(
+      (await a.call("bgmon_start", { command: "sleep 30", id: "BUILD-API_1" })).error,
+      /case-insensitive/,
+    );
+    const generated = await a.call("bgmon_start", { command: "sleep 30" });
+    assert.match(generated.id, /^[a-f0-9]{24}$/);
+    assert.match(
+      (await a.call("bgmon_start", { command: "exit 0", id: generated.id })).error,
+      /reserved generated ID/,
+    );
+    assert.match(
+      (await b.call("bgmon_start", { command: "sleep 30", id: named.id })).error,
+      /Duplicate monitor identity/,
+    );
+    assert.equal((await b.call("bgmon_inspect", { id: named.id })).state, "running");
+    const watch = await b.call("bgmon_watch", { action: "add", monitorId: named.id, kind: "exit" });
+    assert.ok(watch.id);
+    await a.close();
+    await b.close();
+    const reopened = runtime("named-owner", a.entries);
+    await reopened.start();
+    try {
+      assert.equal((await reopened.call("bgmon_inspect", { id: named.id })).state, "running");
+      assert.ok((await reopened.call("bgmon_inspect", {})).some((j: any) => j.id === generated.id));
+    } finally {
+      await reopened.call("bgmon_control", { action: "server_stop" });
+      await reopened.close();
+    }
+  } finally {
+    const cleanup = runtime("named-owner", a.entries);
+    await a.close();
+    await b.close();
+    await cleanup.start();
+    await cleanup.call("bgmon_control", { action: "server_stop" });
+    await cleanup.close();
+  }
+});
+
+test("a readable ID collision after index reset fails closed until the conflicting owner stops", async () => {
+  const a = runtime("collision-first"),
+    b = runtime("collision-second");
+  await a.start();
+  const first = await a.call("bgmon_start", { command: "sleep 30", id: "deploy" });
+  assert.equal(first.id, "deploy");
+  await a.close();
+  await b.start();
+  const resumed = runtime("collision-first", a.entries);
+  try {
+    const second = await b.call("bgmon_start", { command: "sleep 30", id: "deploy" });
+    assert.equal(second.id, "deploy");
+    await resumed.start();
+    for (const name of ["bgmon_inspect", "bgmon_control"]) {
+      const p = name === "bgmon_inspect" ? { id: "deploy" } : { action: "stop", id: "deploy" };
+      assert.match((await resumed.call(name, p)).error, /Duplicate monitor identity/);
+    }
+    assert.equal((await b.call("bgmon_inspect", { id: "deploy" })).state, "running");
+    assert.equal((await b.call("bgmon_control", { action: "server_stop" })).stopped, true);
+    assert.equal((await resumed.call("bgmon_inspect", { id: "deploy" })).state, "running");
+  } finally {
+    await b.call("bgmon_control", { action: "server_stop" });
+    await b.close();
+    await resumed.call("bgmon_control", { action: "server_stop" });
+    await resumed.close();
   }
 });
