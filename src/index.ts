@@ -7,6 +7,7 @@ const ENTRY = "pi-background-monitor:locator:v1";
 const SETTINGS = "pi-background-monitor:settings:v1";
 export default function extension(pi: ExtensionAPI) {
   let binding: Binding | undefined;
+  const dashboards = new Set<AbortController>();
   let limits: Limits = { ...DEFAULT_LIMITS };
   let pending: { text: string; delivery: Delivery }[] = [];
   let dropped = 0;
@@ -253,6 +254,8 @@ export default function extension(pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     const old = binding;
     binding = undefined;
+    for (const dashboard of dashboards) dashboard.abort();
+    dashboards.clear();
     if (flushTimer) clearTimeout(flushTimer);
     flushTimer = undefined;
     pending = [];
@@ -295,19 +298,26 @@ export default function extension(pi: ExtensionAPI) {
           ? w.content[0].text
           : undefined;
       const current = get();
-      await dashboard(
-        ctx,
-        Array.isArray(r.details) ? r.details : [],
-        Array.isArray(w.details) ? w.details : [],
-        limits,
-        (value) => {
-          if (!current.active || current !== binding) return;
-          limits = value;
-          pi.appendEntry(SETTINGS, { session: current.session, limits });
-        },
-        command === "settings" ? "settings" : "list",
-        listError,
-      );
+      const controller = new AbortController();
+      dashboards.add(controller);
+      try {
+        await dashboard(
+          ctx,
+          Array.isArray(r.details) ? r.details : [],
+          Array.isArray(w.details) ? w.details : [],
+          limits,
+          (value) => {
+            if (!current.active || current !== binding) return;
+            limits = value;
+            pi.appendEntry(SETTINGS, { session: current.session, limits });
+          },
+          command === "settings" ? "settings" : "list",
+          listError,
+          { inspect: (id) => broker.action(current, "inspect", { id }), signal: controller.signal },
+        );
+      } finally {
+        dashboards.delete(controller);
+      }
     },
   });
 }

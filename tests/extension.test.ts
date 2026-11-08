@@ -822,6 +822,109 @@ test("settings remain accessible when monitor data cannot be loaded", async () =
   await dashboard(ctx, [], [], DEFAULT_LIMITS, () => {}, "settings", "monitor data unavailable");
 });
 
+for (const id of [undefined, "viewer-test"]) {
+  test(`dashboard output uses the same inspection path without controlling the ${id ? "named" : "generated"} job`, async () => {
+    const { initTheme } = await import("@earendil-works/pi-coding-agent");
+    initTheme("dark", false);
+    const a = runtime(`dashboard-output-${id ?? "generated"}`);
+    await a.start();
+    try {
+      const job = await a.call("bgmon_start", {
+        command: "echo VIEWER_SNAPSHOT_MARKER; sleep 30",
+        ...(id ? { id } : {}),
+      });
+      assert.ok(job.id);
+      if (id) assert.equal(job.id, id);
+      a.ctx.hasUI = true;
+      a.ctx.mode = "tui";
+      a.ctx.ui.custom = async (factory: any) => {
+        let closed = false;
+        const component = factory(
+          { terminal: { rows: 24 }, requestRender() {} },
+          {
+            fg: (_: string, value: string) => value,
+            bg: (_: string, value: string) => value,
+            bold: (value: string) => value,
+          },
+          { matches: (data: string, key: string) => data === key },
+          () => {
+            closed = true;
+          },
+        );
+        component.handleInput("tui.select.confirm");
+        const deadline = Date.now() + 5000;
+        while (
+          !component.render(80).join("\n").includes("VIEWER_SNAPSHOT_MARKER") &&
+          Date.now() < deadline
+        )
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        const rendered = component.render(80).join("\n");
+        const inspection = await a.call("bgmon_inspect", { id: job.id });
+        assert.match(rendered, /VIEWER_SNAPSHOT_MARKER/);
+        assert.match(inspection.untrustedOutput.text, /VIEWER_SNAPSHOT_MARKER/);
+        component.handleInput("tui.select.cancel");
+        assert.equal(closed, false);
+        assert.match(component.render(80).join("\n"), /Selected monitor/);
+        component.handleInput("tui.select.cancel");
+        assert.equal(closed, true);
+        component.dispose();
+      };
+      await a.command("bgmon", "list");
+      assert.equal((await a.call("bgmon_inspect", { id: job.id })).state, "running");
+    } finally {
+      await a.call("bgmon_control", { action: "server_stop" });
+      await a.close();
+    }
+  });
+}
+
+test("session shutdown closes an open output view and leaves the job detached", async () => {
+  const { initTheme } = await import("@earendil-works/pi-coding-agent");
+  initTheme("dark", false);
+  const a = runtime("dashboard-shutdown");
+  await a.start();
+  let recovered: ReturnType<typeof runtime> | undefined;
+  try {
+    const job = await a.call("bgmon_start", { command: "sleep 30" });
+    assert.ok(job.id);
+    a.ctx.hasUI = true;
+    a.ctx.mode = "tui";
+    let component: any;
+    a.ctx.ui.custom = (factory: any) =>
+      new Promise<void>((resolve) => {
+        component = factory(
+          { terminal: { rows: 24 }, requestRender() {} },
+          {
+            fg: (_: string, value: string) => value,
+            bg: (_: string, value: string) => value,
+            bold: (value: string) => value,
+          },
+          { matches: (data: string, key: string) => data === key },
+          () => resolve(),
+        );
+      });
+    const command = a.command("bgmon", "list");
+    const deadline = Date.now() + 5000;
+    while (!component && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(component);
+    component.handleInput("tui.select.confirm");
+    await a.close();
+    await command;
+    recovered = runtime("dashboard-shutdown", a.entries);
+    await recovered.start();
+    assert.equal((await recovered.call("bgmon_inspect", { id: job.id })).state, "running");
+  } finally {
+    if (!recovered) {
+      recovered = runtime("dashboard-shutdown", a.entries);
+      await recovered.start();
+    }
+    await recovered.call("bgmon_control", { action: "server_stop" });
+    await recovered.close();
+    await a.close();
+  }
+});
+
 test("custom monitor IDs are shared, unique, safe, and recoverable", async () => {
   const a = runtime("named-owner"),
     b = runtime("named-other");

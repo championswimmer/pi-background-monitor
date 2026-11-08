@@ -20,6 +20,10 @@ test("private server retains fast exit and asynchronous jobs", async () => {
     await writeFile(file, "echo READY; exit 7\n");
     const pane = await tm.start(file, d.dir, true);
     await tm.verify();
+    const size = await checked(
+      tm.args("display-message", "-p", "-t", pane, "#{window_width}x#{window_height}"),
+    );
+    assert.equal(size.stdout.trim(), "80x32");
     for (let i = 0; i < 50 && (await tm.status(pane)).state === "running"; i++)
       await new Promise((r) => setTimeout(r, 20));
     assert.deepEqual(await tm.status(pane), { state: "exited", exitCode: 7, signal: undefined });
