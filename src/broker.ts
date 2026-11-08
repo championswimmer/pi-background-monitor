@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { Manager } from "./manager.ts";
+import { Manager, validId } from "./manager.ts";
 import { sanitize } from "./output.ts";
 
 type Delivery = "ui" | "nextTurn" | "wake";
@@ -78,6 +78,10 @@ class Broker {
     const unseen = jobs.filter((j) => !this.monitors.has(j.id));
     if (this.monitors.size + unseen.length > 64)
       throw new Error("Maximum 64 shared monitors; cannot index recovered jobs");
+    for (const j of jobs) {
+      const existing = this.monitors.get(j.id);
+      if (existing && existing !== owner) throw new Error("Duplicate monitor identity");
+    }
     const ids = new Set(jobs.map((j) => j.id));
     for (const [id, indexedOwner] of this.monitors)
       if (indexedOwner === owner && !ids.has(id)) {
@@ -85,8 +89,6 @@ class Broker {
         for (const [wid, w] of this.watches) if (w.job === id) this.watches.delete(wid);
       }
     for (const j of jobs) {
-      const existing = this.monitors.get(j.id);
-      if (existing && existing !== owner) throw new Error("Duplicate monitor identity");
       this.monitors.set(j.id, owner);
     }
     return owner;
@@ -135,9 +137,14 @@ class Broker {
       await Promise.all(owners.map((o) => o.manager.close()));
     });
   }
-  start(binding: Binding, command: string, cwd: string) {
+  start(binding: Binding, command: string, cwd: string, requestedId?: string) {
     return this.run(async () => {
+      if (requestedId !== undefined && !validId(requestedId)) throw new Error("Invalid job ID");
+      if (requestedId !== undefined && /^[a-f0-9]{24}$/.test(requestedId))
+        throw new Error("ID uses reserved generated ID format");
       const owner = await this.recover(binding);
+      if (requestedId !== undefined && this.monitors.has(requestedId))
+        throw new Error("Duplicate monitor identity");
       if (this.monitors.size >= 64) throw new Error("Maximum 64 shared monitors");
       const jobs = await owner.manager.run(() => owner.manager.jobs());
       const limits = binding.limits();
@@ -145,7 +152,12 @@ class Broker {
         throw new Error(`Maximum ${limits.maxTotal} retained jobs; forget a finished job first`);
       if (jobs.filter((job) => job.state === "running").length >= limits.maxOpen)
         throw new Error(`Maximum ${limits.maxOpen} running jobs`);
-      const result = await owner.manager.run(() => owner.manager.start(command, cwd));
+      let jobId = requestedId;
+      if (jobId === undefined) {
+        do jobId = randomBytes(12).toString("hex");
+        while (this.monitors.has(jobId));
+      }
+      const result = await owner.manager.run(() => owner.manager.start(command, cwd, jobId));
       this.monitors.set(result.id, owner);
       return result;
     });
@@ -174,7 +186,7 @@ class Broker {
         this.configure(w, p);
         return this.watchInfo(w);
       }
-      if (p.id && !this.monitors.has(p.id) && action !== "unwatch" && action !== "update_watch")
+      if (p.id && (!/^[a-f0-9]{24}$/.test(p.id) || !this.monitors.has(p.id)))
         await this.recover(binding);
       if (action === "server_stop") {
         const owner = p.id ? this.find(p.id) : this.owner(binding);

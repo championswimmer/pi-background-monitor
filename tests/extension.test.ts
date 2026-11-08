@@ -559,7 +559,10 @@ test("bgmon interface validates action arguments and command routing", async () 
       ["bgmon_start", "bgmon_inspect", "bgmon_control", "bgmon_watch"],
     );
     assert.deepEqual([...a.commands.keys()], ["bgmon"]);
-    assert.deepEqual(Object.keys(a.tools.get("bgmon_start").parameters.properties), ["command"]);
+    assert.deepEqual(Object.keys(a.tools.get("bgmon_start").parameters.properties), [
+      "command",
+      "id",
+    ]);
     assert.deepEqual(Object.keys(a.tools.get("bgmon_inspect").parameters.properties), ["id"]);
     assert.deepEqual(Object.keys(a.tools.get("bgmon_control").parameters.properties), [
       "action",
@@ -794,4 +797,83 @@ test("settings remain accessible when monitor data cannot be loaded", async () =
     },
   };
   await dashboard(ctx, [], [], DEFAULT_LIMITS, () => {}, "settings", "monitor data unavailable");
+});
+
+test("custom monitor IDs are shared, unique, safe, and recoverable", async () => {
+  const a = runtime("named-owner"),
+    b = runtime("named-other");
+  await a.start();
+  await b.start();
+  try {
+    for (const id of ["", "  ", "../evil", "bad\nname", "a".repeat(65)])
+      assert.match(
+        (await a.call("bgmon_start", { command: "exit 0", id })).error,
+        /Invalid job ID/,
+      );
+    const named = await a.call("bgmon_start", { command: "sleep 30", id: "build-api_1" });
+    assert.equal(named.id, "build-api_1", JSON.stringify(named));
+    assert.match(
+      (await a.call("bgmon_start", { command: "sleep 30", id: "BUILD-API_1" })).error,
+      /case-insensitive/,
+    );
+    const generated = await a.call("bgmon_start", { command: "sleep 30" });
+    assert.match(generated.id, /^[a-f0-9]{24}$/);
+    assert.match(
+      (await a.call("bgmon_start", { command: "exit 0", id: generated.id })).error,
+      /reserved generated ID/,
+    );
+    assert.match(
+      (await b.call("bgmon_start", { command: "sleep 30", id: named.id })).error,
+      /Duplicate monitor identity/,
+    );
+    assert.equal((await b.call("bgmon_inspect", { id: named.id })).state, "running");
+    const watch = await b.call("bgmon_watch", { action: "add", monitorId: named.id, kind: "exit" });
+    assert.ok(watch.id);
+    await a.close();
+    await b.close();
+    const reopened = runtime("named-owner", a.entries);
+    await reopened.start();
+    try {
+      assert.equal((await reopened.call("bgmon_inspect", { id: named.id })).state, "running");
+      assert.ok((await reopened.call("bgmon_inspect", {})).some((j: any) => j.id === generated.id));
+    } finally {
+      await reopened.call("bgmon_control", { action: "server_stop" });
+      await reopened.close();
+    }
+  } finally {
+    const cleanup = runtime("named-owner", a.entries);
+    await a.close();
+    await b.close();
+    await cleanup.start();
+    await cleanup.call("bgmon_control", { action: "server_stop" });
+    await cleanup.close();
+  }
+});
+
+test("a readable ID collision after index reset fails closed until the conflicting owner stops", async () => {
+  const a = runtime("collision-first"),
+    b = runtime("collision-second");
+  await a.start();
+  const first = await a.call("bgmon_start", { command: "sleep 30", id: "deploy" });
+  assert.equal(first.id, "deploy");
+  await a.close();
+  await b.start();
+  const resumed = runtime("collision-first", a.entries);
+  try {
+    const second = await b.call("bgmon_start", { command: "sleep 30", id: "deploy" });
+    assert.equal(second.id, "deploy");
+    await resumed.start();
+    for (const name of ["bgmon_inspect", "bgmon_control"]) {
+      const p = name === "bgmon_inspect" ? { id: "deploy" } : { action: "stop", id: "deploy" };
+      assert.match((await resumed.call(name, p)).error, /Duplicate monitor identity/);
+    }
+    assert.equal((await b.call("bgmon_inspect", { id: "deploy" })).state, "running");
+    assert.equal((await b.call("bgmon_control", { action: "server_stop" })).stopped, true);
+    assert.equal((await resumed.call("bgmon_inspect", { id: "deploy" })).state, "running");
+  } finally {
+    await b.call("bgmon_control", { action: "server_stop" });
+    await b.close();
+    await resumed.call("bgmon_control", { action: "server_stop" });
+    await resumed.close();
+  }
 });
