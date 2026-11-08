@@ -16,7 +16,8 @@ type Job = {
 type Locator = { session: string; dir: string; token: string };
 type Registry = Locator & { version: 1; jobs: Job[] };
 const id = () => randomBytes(12).toString("hex");
-const validId = (x: unknown): x is string => typeof x === "string" && /^[a-f0-9]{24}$/.test(x);
+export const validId = (x: unknown): x is string =>
+  typeof x === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(x);
 function validLocator(x: Locator, session: string): boolean {
   return (
     !!x &&
@@ -130,6 +131,8 @@ export class Manager {
         data.token !== locator.token ||
         !Array.isArray(data.jobs) ||
         data.jobs.length > MAX_MONITORS ||
+        new Set(data.jobs.map((j) => (typeof j.id === "string" ? j.id.toLowerCase() : j.id)))
+          .size !== data.jobs.length ||
         data.jobs.some(
           (j) =>
             !validId(j.id) ||
@@ -179,7 +182,8 @@ export class Manager {
     if (!j) throw new Error("Unknown job");
     return j;
   }
-  async start(command: string, cwd: string) {
+  async start(command: string, cwd: string, requestedId?: string) {
+    if (requestedId !== undefined && !validId(requestedId)) throw new Error("Invalid job ID");
     if (typeof command !== "string" || !command.trim() || Buffer.byteLength(command) > 65536)
       throw new Error("Command must be 1–65536 bytes");
     if (!(await stat(cwd)).isDirectory()) throw new Error("cwd is not a directory");
@@ -188,13 +192,16 @@ export class Manager {
       tm = this.tm!;
     if (d.jobs.length >= MAX_MONITORS)
       throw new Error(`Maximum ${MAX_MONITORS} retained jobs; forget a finished job first`);
+    const jobId = requestedId ?? id();
+    if (d.jobs.some((job) => job.id.toLowerCase() === jobId.toLowerCase()))
+      throw new Error("Duplicate monitor identity (case-insensitive within a server)");
     const exists = await this.verified();
     if (!exists && d.jobs.length)
       throw new Error(
         "Server is missing; jobs lost. Stop the server record before starting again.",
       );
     const job: Job = {
-      id: id(),
+      id: jobId,
       created: new Date().toISOString(),
       command: sanitize(command).replace(/\s+/g, " ").slice(0, 512),
     };

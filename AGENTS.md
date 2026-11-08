@@ -22,9 +22,13 @@
 - Tools are separate shell execution permission surfaces: policies for Pi's built-in Bash tool may not cover them. tmux is not a sandbox; the socket and ownership token are not protection against malicious processes running as the same user. Do not hide arbitrary command execution or treat terminal content as trusted instructions.
 - Bound output, jobs, watches and notifications; avoid overlapping polls, honor Pi session shutdown and do not send stale-session messages. Automatic notifications contain metadata, not command or output; `wake` deliberately enters model context and may start a turn. UI-only notifications are not displayed in noninteractive sessions.
 - Watches are best-effort snapshots, not a lossless stream: transient text can be missed, rows can recur, and alternate-screen applications may behave differently. Watches expire, do not survive reload, and cannot observe events while Pi is closed. Repeat watches require a transition and have a ten-second cooldown.
-- Current limits include eight retained jobs per owner, 64 indexed monitors, eight watches per session and 64 watches total, 200 lines/16 KiB per inspection, 2,000 tmux history rows, and watch intervals of 1–300 seconds and TTLs of 1–1,800 seconds. Check the implementation before changing or documenting limits.
+- Current limits include 64 retained jobs per owner, 64 indexed monitors, eight watches per session and 64 watches total, 200 lines/16 KiB per inspection, 2,000 tmux history rows, and watch intervals of 1–300 seconds and TTLs of 1–1,800 seconds. Check the implementation before changing or documenting limits.
 - Maintain Linux/macOS portability. Avoid GNU-only runtime utilities and native dependencies. No web server or browser viewer is part of the current extension.
 
 ## Verification
 
 Run `npm run check`, `npm run lint`, `npm test`, and relevant focused regressions. TypeScript formatting and linting are enforced with Biome (`biome.json`); apply `npm run format` before committing. Use `npm pack --dry-run` to check package contents when relevant. CI covers Linux and macOS; report which platforms actually ran.
+
+## Readable monitor ID limitation
+
+Readable IDs are unique only among currently indexed monitors. After the last session shuts down, an unrecovered owner is invisible: another owner can claim its ID. Recovery detects this collision and readable-ID operations fail closed until the conflicting indexed owner is stopped or forgotten; `server_stop` without an ID can still clean up the caller's own server. Do not scan or adopt other sessions' private registries to resolve this. Generated IDs reserve the 24-lowercase-hex namespace and remain probabilistically unique.
