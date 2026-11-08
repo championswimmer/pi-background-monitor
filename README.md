@@ -7,10 +7,10 @@ A [Pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) exte
 Requires Pi 1.5.0 or later, Node.js 22+, Bash, and tmux 3.2+ on Linux or macOS. Install tmux with your package manager, then run:
 
 ```sh
-pi install git:github.com/championswimmer/pi-background-monitor
+pi install npm:pi-background-monitor
 ```
 
-Reload Pi after installation. For a local checkout use `pi install ./pi-background-monitor` from its parent directory.
+Reload Pi after installation. Alternatively, install from Git with `pi install git:github.com/championswimmer/pi-background-monitor`, or from a local checkout with `pi install ./pi-background-monitor` from its parent directory.
 
 ## Use
 
