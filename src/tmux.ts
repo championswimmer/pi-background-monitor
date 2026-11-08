@@ -46,6 +46,6 @@ export class Tmux {
     const r = await checked(this.args(...args, "/bin/bash", "--noprofile", "--norc", script));
     const pane = r.stdout.trim(); if (!/^%\d+$/.test(pane)) throw new Error("Unexpected tmux pane ID"); return pane;
   }
-  async status(pane: string) { const r = await client(this.args("display-message", "-p", "-t", pane, "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}")); if (r.code) return { state: "lost" as const }; const [dead, status, signal] = r.stdout.trim().split("|"); return dead === "1" ? { state: "exited" as const, exitCode: /^\d+$/.test(status) ? Number(status) : undefined, signal: signal || undefined } : { state: "running" as const }; }
+  async status(pane: string) { const r = await client(this.args("display-message", "-p", "-t", pane, "#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}")); if (r.code) return { state: "lost" as const }; const [dead, status, signal] = r.stdout.trim().split("|"); return dead === "1" ? { state: "exited" as const, exitCode: /^\d+$/.test(status) ? Number(status) : undefined, signal: signal || undefined } : dead === "0" ? { state: "running" as const } : { state: "lost" as const }; }
   async capture(pane: string) { const r = await checked(this.args("capture-pane", "-p", "-t", pane, "-S", "-200")); return r; }
 }

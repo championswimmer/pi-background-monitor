@@ -19,17 +19,32 @@ export class Manager {
   run<T>(fn: () => Promise<T>): Promise<T> { const p = this.pending.then(() => { if (this.closed) throw new Error("Session closed"); return fn(); }); this.pending = p.catch(() => {}); return p; }
   async close() { this.closed = true; await this.pending; if (this.locked && this.data) { await rm(join(this.data.dir, "lock"), { recursive: true, force: true }); this.locked = false; } }
   private async acquire(dir: string) { try { await mkdir(join(dir, "lock"), { mode: 0o700 }); this.locked = true; } catch (e) { if ((e as NodeJS.ErrnoException).code === "EEXIST") throw new Error(`Controller lock exists: ${dir}/lock. If no Pi process uses this session, remove it manually.`); throw e; } }
+  private async directoryExists(dir: string): Promise<boolean> {
+    try {
+      const ds = await lstat(dir);
+      if (!ds.isDirectory() || ds.isSymbolicLink() || ds.uid !== process.getuid?.() || (ds.mode & 0o077) !== 0) throw new Error("Unsafe background directory");
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw e;
+    }
+  }
   private async load(create: boolean) {
-    if (this.data) return;
-    const locator = this.locate() as Locator | undefined;
+    if (this.data) {
+      if (await this.directoryExists(this.data.dir)) return;
+      this.data = undefined; this.tm = undefined; this.locked = false; this.persist(null);
+    }
+    let locator = this.locate() as Locator | null | undefined;
+    if (locator) {
+      if (!validLocator(locator, this.session)) throw new Error("Invalid background server locator; refusing recovery");
+      if (!await this.directoryExists(locator.dir)) { this.persist(null); locator = null; }
+    }
     if (!locator) {
       if (!create) return;
       await probe(); const d = await createDirectory(); await this.acquire(d.dir);
       this.data = { version: 1, session: this.session, dir: d.dir, token: d.token, jobs: [] }; this.tm = new Tmux(d.socket, d.dir, d.token);
       await this.save(); this.persist({ session: this.session, dir: d.dir, token: d.token }); return;
     }
-    if (!validLocator(locator, this.session)) throw new Error("Invalid background server locator; refusing recovery");
-    const ds = await lstat(locator.dir); if (!ds.isDirectory() || ds.isSymbolicLink() || ds.uid !== process.getuid?.() || (ds.mode & 0o077) !== 0) throw new Error("Unsafe background directory");
     await this.acquire(locator.dir);
     try {
       const path = join(locator.dir, "registry.json"), s = await lstat(path); if (!s.isFile() || s.isSymbolicLink() || s.size > 262144 || s.uid !== process.getuid?.() || (s.mode & 0o077)) throw new Error("Unsafe registry");
@@ -54,7 +69,7 @@ export class Manager {
     return { id: job.id, state: "running", socket: tm.socket, attach: `tmux -S ${quote(tm.socket)} attach -t jobs`, note: "Job survives Pi shutdown; explicitly stop it or the server." };
   }
   async jobs() { await this.load(false); if (!this.data) return []; const available = await this.verified(); return Promise.all(this.data.jobs.map(async j => ({ id: j.id, created: j.created, ...(j.cancelled ? { state: "cancelled" } : available && j.pane ? await this.tm!.status(j.pane) : { state: "lost" }) }))); }
-  async inspect(jobId: string) { await this.load(false); const j = this.find(jobId); if (j.cancelled) return { id: j.id, state: "cancelled", timestamp: new Date().toISOString(), untrustedOutput: j.finalOutput ?? { text: "", truncated: false }, clientTruncated: false }; if (!j.pane || !await this.verified()) return { id: j.id, state: "lost" }; const status = j.cancelled ? { state: "cancelled" } : await this.tm!.status(j.pane); const r = await this.tm!.capture(j.pane); return { id: j.id, ...status, timestamp: new Date().toISOString(), untrustedOutput: bounded(r.stdout), clientTruncated: r.truncated }; }
+  async inspect(jobId: string) { await this.load(false); const j = this.find(jobId); if (j.cancelled) return { id: j.id, state: "cancelled", timestamp: new Date().toISOString(), untrustedOutput: j.finalOutput ?? { text: "", truncated: false }, clientTruncated: false }; if (!j.pane || !await this.verified()) return { id: j.id, state: "lost" }; const status = await this.tm!.status(j.pane); if (status.state === "lost") return { id: j.id, ...status }; try { const r = await this.tm!.capture(j.pane); return { id: j.id, ...status, timestamp: new Date().toISOString(), untrustedOutput: bounded(r.stdout), clientTruncated: r.truncated }; } catch (e) { if ((await this.tm!.status(j.pane)).state === "lost") return { id: j.id, state: "lost" }; throw e; } }
   async stop(jobId: string) { await this.load(false); const j = this.find(jobId); if (j.pane && await this.verified() && (await this.tm!.status(j.pane)).state === "running") { try { j.finalOutput = bounded((await this.tm!.capture(j.pane)).stdout); } catch { /* pane may exit during cancellation */ } await checked(this.tm!.args("send-keys", "-t", j.pane, "C-c")); await new Promise(r => setTimeout(r, 2000)); if ((await this.tm!.status(j.pane)).state === "running") await client(this.tm!.args("kill-pane", "-t", j.pane)); j.cancelled = true; await this.save(); } return { id: j.id, state: j.cancelled ? "cancelled" : "not-running" }; }
   async forget(jobId: string) { await this.load(false); const j = this.find(jobId); if (j.pane && await this.verified()) { if ((await this.tm!.status(j.pane)).state === "running") throw new Error("Stop running job before forgetting it"); await client(this.tm!.args("kill-pane", "-t", j.pane)); } this.data!.jobs = this.data!.jobs.filter(x => x !== j); await this.save(); await unlink(join(this.data!.dir, `${j.id}.sh`)).catch(() => {}); return { forgotten: jobId }; }
   async serverStop() { await this.load(false); if (!this.data) return { stopped: false }; if (await this.verified()) await checked(this.tm!.args("kill-server")); const dir = this.data.dir; this.data = undefined; this.tm = undefined; this.locked = false; await rm(dir, { recursive: true, force: true }); this.persist(null); return { stopped: true }; }
