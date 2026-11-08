@@ -26,7 +26,7 @@ Watches are best-effort snapshots: transient or overwritten output may be missed
 
 Agents have four focused tools:
 
-- `bgmon_start`: `command` (required Bash script) starts a job and returns a monitor `id`.
+- `bgmon_start`: `command` (required Bash script) starts a job. Optional `id` selects a unique monitor ID (1–64 ASCII letters, digits, `_` or `-`); otherwise one is generated. IDs within a server must also differ ignoring case; 24-character lowercase hex IDs are reserved for generated IDs.
 - `bgmon_inspect`: optional monitor `id`; omit it to list monitors, or provide it for a bounded, untrusted output snapshot.
 - `bgmon_control`: `action` is `stop`, `forget`, or `server_stop`. `id` is required except for `server_stop`, which stops the selected monitor's entire server or, without an ID, your session's server. `stop` interrupts a job; `forget` removes a stopped job.
 - `bgmon_watch`: `action` is `add`, `list`, `update`, or `remove`. `add` requires `monitorId` and `kind` (`contains`, `changed`, or `exit`); `contains` also requires `pattern` (literal text, 1–256 characters). It returns a watch ID. `list` lists this session's watches; `update` and `remove` require `watchId`. Updates cannot change `monitorId`, `kind`, or `pattern`.

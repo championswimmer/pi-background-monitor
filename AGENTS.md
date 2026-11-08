@@ -28,3 +28,7 @@
 ## Verification
 
 Run `npm run check`, `npm run lint`, `npm test`, and relevant focused regressions. TypeScript formatting and linting are enforced with Biome (`biome.json`); apply `npm run format` before committing. Use `npm pack --dry-run` to check package contents when relevant. CI covers Linux and macOS; report which platforms actually ran.
+
+## Readable monitor ID limitation
+
+Readable IDs are unique only among currently indexed monitors. After the last session shuts down, an unrecovered owner is invisible: another owner can claim its ID. Recovery detects this collision and readable-ID operations fail closed until the conflicting indexed owner is stopped or forgotten; `server_stop` without an ID can still clean up the caller's own server. Do not scan or adopt other sessions' private registries to resolve this. Generated IDs reserve the 24-lowercase-hex namespace and remain probabilistically unique.
