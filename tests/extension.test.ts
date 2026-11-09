@@ -25,6 +25,13 @@ test("system prompt provides bounded background monitor guidance only when avail
   assert.ok(guidance.split("\n").length + 2 <= 5);
   handler({ systemPromptOptions: options });
   assert.equal(options.sections.background_monitor, guidance);
+  options.selectedTools = ["bgmon_watch"];
+  handler({ systemPromptOptions: options });
+  assert.match(options.sections.background_monitor, /contains.*literal.*regex.*JavaScript/);
+  assert.match(options.sections.background_monitor, /imsu/);
+  options.selectedTools = ["bgmon_start", "bgmon_watch"];
+  handler({ systemPromptOptions: options });
+  assert.equal(options.sections.background_monitor.split("\n").length, 5);
   options.selectedTools = [];
   handler({ systemPromptOptions: options });
   assert.deepEqual(options.sections, { existing: "preserve me" });
@@ -601,6 +608,7 @@ test("bgmon interface validates action arguments and command routing", async () 
       "watchId",
       "kind",
       "pattern",
+      "flags",
       "label",
       "delivery",
       "intervalSeconds",
@@ -1028,5 +1036,85 @@ test("a readable ID collision after index reset fails closed until the conflicti
     await b.close();
     await resumed.call("bgmon_control", { action: "server_stop" });
     await resumed.close();
+  }
+});
+
+test("regex watches validate inputs and notify on matching snapshots", async () => {
+  const a = runtime("regex-watch");
+  await a.start();
+  try {
+    const job = await a.call("bgmon_start", {
+      command: "sleep 1; echo 'error TS1234: secret'; sleep 8",
+    });
+    assert.ok(job.id, JSON.stringify(job));
+    for (const args of [
+      { kind: "regex", pattern: "(" },
+      { kind: "regex", pattern: "a", flags: "g" },
+      { kind: "regex", pattern: "a", flags: "ii" },
+      { kind: "contains", pattern: "a", flags: "i" },
+      { kind: "regex", pattern: "" },
+    ]) {
+      const result = await a.call("bgmon_watch", { action: "add", monitorId: job.id, ...args });
+      assert.ok(result.error, JSON.stringify(result));
+    }
+    const watch = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "regex",
+      pattern: "ERROR TS\\d+",
+      flags: "i",
+      delivery: "wake",
+      intervalSeconds: 1,
+    });
+    assert.ok(watch.id, JSON.stringify(watch));
+    const deadline = Date.now() + 6000;
+    while (!a.messages.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(a.messages.length, 1);
+    assert.match(a.messages[0][0].content, /regex/);
+    assert.doesNotMatch(a.messages[0][0].content, /TS1234|secret|ERROR/);
+    assert.deepEqual(a.messages[0][1], { deliverAs: "followUp", triggerTurn: true });
+  } finally {
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("slow regex watch is removed with metadata-only notice and literal watches still work", async () => {
+  const a = runtime("regex-timeout");
+  await a.start();
+  try {
+    const job = await a.call("bgmon_start", {
+      command: "sleep 1; printf '%1000s' '' | tr ' ' a; echo '!'; sleep 8",
+    });
+    assert.ok(job.id, JSON.stringify(job));
+    const regex = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "regex",
+      pattern: "(a+)+b",
+      delivery: "wake",
+      intervalSeconds: 1,
+    });
+    const literal = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "(a+)+b",
+      intervalSeconds: 1,
+    });
+    assert.ok(regex.id && literal.id);
+    const deadline = Date.now() + 7000;
+    while (!a.messages.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(a.messages.length, 1);
+    assert.match(a.messages[0][0].content, /regex watch removed \(evaluation failed\)/);
+    assert.doesNotMatch(a.messages[0][0].content, /\(a\+\)\+b|aaaa/);
+    const watches = await a.call("bgmon_watch", { action: "list" });
+    assert.deepEqual(
+      watches.map((w: { id: string }) => w.id),
+      [literal.id],
+    );
+  } finally {
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
   }
 });

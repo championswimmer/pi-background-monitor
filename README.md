@@ -13,7 +13,7 @@ Requires Pi 1.5.0 or later, Node.js 22+, Bash, and tmux 3.2+ on Linux or macOS. 
 pi install npm:pi-background-monitor
 ```
 
-Reload Pi after installation. Alternatively, install from Git with `pi install git:github.com/championswimmer/pi-background-monitor`, or from a local checkout with `pi install ./pi-background-monitor` from its parent directory.
+Reload Pi after installation. Fully restart Pi when upgrading an already loaded older version to enable regex watches. Alternatively, install from Git with `pi install git:github.com/championswimmer/pi-background-monitor`, or from a local checkout with `pi install ./pi-background-monitor` from its parent directory.
 
 ## Use
 
@@ -32,7 +32,7 @@ Agents have four focused tools:
 - `bgmon_start`: `command` (required Bash script) starts a job. Optional `id` selects a unique monitor ID (1–64 ASCII letters, digits, `_` or `-`); otherwise one is generated. IDs within a server must also differ ignoring case; 24-character lowercase hex IDs are reserved for generated IDs.
 - `bgmon_inspect`: optional monitor `id`; omit it to list monitors, or provide it for a bounded, untrusted output snapshot.
 - `bgmon_control`: `action` is `stop`, `forget`, or `server_stop`. `id` is required except for `server_stop`, which stops the selected monitor's entire server or, without an ID, your session's server. `stop` interrupts a job; `forget` removes a stopped job.
-- `bgmon_watch`: `action` is `add`, `list`, `update`, or `remove`. `add` requires `monitorId` and `kind` (`contains`, `changed`, or `exit`); `contains` also requires `pattern` (literal text, 1–256 characters). It returns a watch ID. `list` lists this session's watches; `update` and `remove` require `watchId`. Updates cannot change `monitorId`, `kind`, or `pattern`.
+- `bgmon_watch`: `action` is `add`, `list`, `update`, or `remove`. `add` requires `monitorId` and `kind` (`contains`, `regex`, `changed`, or `exit`); `contains` and `regex` require a `pattern` (1–256 characters). `contains` matches literal text; `regex` uses JavaScript regex source without `/` delimiters and optional `flags` (`i`, `m`, `s`, `u`, each at most once). For example, use `pattern: "error TS\\d+"` and `flags: "i"` in a JSON tool call. Regex matching runs in a time-limited worker; a failed watch is removed with a notification. It returns a watch ID. `list` lists this session's watches; `update` and `remove` require `watchId`. Updates cannot change `monitorId`, `kind`, `pattern`, or `flags`.
 
 Watch add/update options: `label` (≤120 characters), `delivery` (`ui` default, `nextTurn`, or `wake`), `intervalSeconds` (1–300, default 5), `ttlSeconds` (1–1800, default 300; updates renew from now), and `once` (default true). Repeated watches need a state transition and a 10-second cooldown; exit watches always remove themselves.
 
