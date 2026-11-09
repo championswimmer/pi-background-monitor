@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { Manager, validId } from "./manager.ts";
 import { sanitize } from "./output.ts";
+import { RegexMatcher } from "./regex.ts";
 
 type Delivery = "ui" | "nextTurn" | "wake";
 type Binding = {
@@ -16,8 +17,9 @@ type Watch = {
   id: string;
   job: string;
   subscriber: Binding;
-  kind: "contains" | "changed" | "exit";
+  kind: "contains" | "regex" | "changed" | "exit";
   pattern?: string;
+  flags?: string;
   label: string;
   delivery: Delivery;
   expires: number;
@@ -29,8 +31,9 @@ type Watch = {
 };
 export type WatchOptions = {
   id?: string;
-  kind?: "contains" | "changed" | "exit";
+  kind?: "contains" | "regex" | "changed" | "exit";
   pattern?: string;
+  flags?: string;
   label?: string;
   delivery?: Delivery;
   intervalSeconds?: number;
@@ -39,6 +42,9 @@ export type WatchOptions = {
 };
 
 class Broker {
+  readonly regexWatchVersion = 1;
+  private regex = new RegexMatcher();
+  private regexCursor = 0;
   private owners = new Map<string, Owner>();
   private monitors = new Map<string, Owner>();
   private subscribers = new Set<Binding>();
@@ -115,10 +121,11 @@ class Broker {
       }
   }
   async leave(binding: Binding) {
+    binding.active = false;
     this.subscribers.delete(binding);
     for (const [id, w] of this.watches) if (w.subscriber === binding) this.watches.delete(id);
     await this.run(async () => {
-      binding.active = false;
+      for (const [id, w] of this.watches) if (w.subscriber === binding) this.watches.delete(id);
       for (const [session, owner] of this.owners) {
         if (owner.binding === binding)
           owner.binding = [...this.subscribers].find((b) => b.active && b.session === session);
@@ -131,6 +138,7 @@ class Broker {
       if (this.timer) clearInterval(this.timer);
       this.timer = undefined;
       this.watches.clear();
+      this.regex.close();
       this.monitors.clear();
       const owners = [...this.owners.values()];
       this.owners.clear();
@@ -211,19 +219,33 @@ class Broker {
           [...this.watches.values()].filter((w) => w.subscriber === binding).length >= 8
         )
           throw new Error("Maximum 8 watches per session and 64 shared watches");
-        if (!p.kind || !["contains", "changed", "exit"].includes(p.kind))
+        if (!p.kind || !["contains", "regex", "changed", "exit"].includes(p.kind))
           throw new Error("Invalid watch kind");
         if (
-          p.kind === "contains" &&
+          (p.kind === "contains" || p.kind === "regex") &&
           (typeof p.pattern !== "string" || !p.pattern.length || p.pattern.length > 256)
         )
-          throw new Error("contains requires a literal pattern of 1–256 characters");
+          throw new Error("contains and regex require a pattern of 1–256 characters");
+        if (p.kind !== "contains" && p.kind !== "regex" && p.pattern !== undefined)
+          throw new Error("pattern is only valid for contains or regex");
+        if (
+          p.flags !== undefined &&
+          (p.kind !== "regex" ||
+            typeof p.flags !== "string" ||
+            !/^(?!.*(.).*\1)[imsu]*$/.test(p.flags))
+        )
+          throw new Error("Invalid regex flags (use unique i, m, s, u)");
+        if (p.kind === "regex") {
+          await this.regex.test(p.pattern!, p.flags ?? "");
+          if (!binding.active) throw new Error("No active Pi session");
+        }
         const w: Watch = {
           id: randomBytes(12).toString("hex"),
           job: p.id!,
           subscriber: binding,
           kind: p.kind,
           pattern: p.pattern,
+          flags: p.flags,
           label: "",
           delivery: "ui",
           expires: Date.now() + 300000,
@@ -285,12 +307,21 @@ class Broker {
     try {
       await this.run(async () => {
         const now = Date.now();
-        for (const w of [...this.watches.values()]) {
+        const all = [...this.watches.values()];
+        const regex = all.filter((w) => w.kind === "regex");
+        const rotated = regex.slice(this.regexCursor).concat(regex.slice(0, this.regexCursor));
+        let regexStart = 0;
+        for (const w of [...all.filter((w) => w.kind !== "regex"), ...rotated]) {
           if (!w.subscriber.active || w.expires <= now) {
             this.watches.delete(w.id);
             continue;
           }
           if (now < w.next) continue;
+          if (w.kind === "regex") {
+            if (regexStart && Date.now() - regexStart >= 200) break;
+            if (!regexStart) regexStart = Date.now();
+            this.regexCursor = (regex.indexOf(w) + 1) % regex.length;
+          }
           w.next = now + w.interval;
           try {
             const owner = this.find(w.job);
@@ -305,7 +336,11 @@ class Broker {
                 ? state !== "running"
                 : w.kind === "contains"
                   ? text.includes(w.pattern!)
-                  : text;
+                  : w.kind === "regex"
+                    ? await this.regex.test(w.pattern!, w.flags ?? "", text)
+                    : text;
+            if (!w.subscriber.active || this.watches.get(w.id) !== w || w.expires <= Date.now())
+              continue;
             const triggered =
               w.kind === "changed"
                 ? w.previous !== undefined && value !== w.previous
@@ -321,6 +356,11 @@ class Broker {
             }
             if (state !== "running" && w.kind !== "exit") this.watches.delete(w.id);
           } catch {
+            if (w.kind === "regex" && w.subscriber.active && this.watches.get(w.id) === w)
+              w.subscriber.notify(
+                `bgmon watch ${w.id} job ${w.job}: regex watch removed (evaluation failed)`,
+                w.delivery,
+              );
             this.watches.delete(w.id);
           }
         }
