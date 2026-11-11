@@ -1,7 +1,40 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { afterEach, beforeEach, test } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import extension from "../src/index.ts";
+import { checked, Tmux } from "../src/tmux.ts";
+
+const sockets = new Set<string>();
+const previousStateHome = process.env.XDG_STATE_HOME;
+let testStateHome = "";
+function track(value: any) {
+  if (typeof value?.socket === "string" && /^\/tmp\/pbm-[A-Za-z0-9]{6}\/s$/.test(value.socket))
+    sockets.add(value.socket);
+  return value;
+}
+beforeEach(async () => {
+  testStateHome = await mkdtemp(join(tmpdir(), "pbm-extension-"));
+  process.env.XDG_STATE_HOME = testStateHome;
+});
+afterEach(async () => {
+  for (const socket of sockets) {
+    const dir = dirname(socket);
+    const config = await readFile(join(dir, "tmux.conf"), "utf8").catch(() => "");
+    const token = /@pbm_owner ([a-f0-9]{48})/.exec(config)?.[1];
+    if (!token) continue;
+    const tm = new Tmux(socket, dir, token);
+    const verified = await tm.verify().catch(() => undefined);
+    if (verified === true) await checked(tm.args("kill-server")).catch(() => {});
+    if (verified !== undefined) await rm(dir, { recursive: true, force: true });
+  }
+  sockets.clear();
+  await rm(testStateHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME;
+  else process.env.XDG_STATE_HOME = previousStateHome;
+});
 
 test("system prompt provides bounded background monitor guidance only when available", () => {
   const events = new Map<string, any>();
@@ -59,7 +92,7 @@ test("watch wakes only on selected event, not routine output; shutdown detaches"
   extension(pi);
   await events.get("session_start")({}, ctx);
   const execute = async (name: string, p: unknown) =>
-    (await tools.get(name).execute("call", p, undefined, undefined, ctx)).details;
+    track((await tools.get(name).execute("call", p, undefined, undefined, ctx)).details);
   try {
     const start = await execute("bgmon_start", {
       command: "sleep 1; echo SECRET_READY; sleep 3",
@@ -86,9 +119,6 @@ test("watch wakes only on selected event, not routine output; shutdown detaches"
 });
 
 test("exit watch reports a lost pane while another job remains alive", async () => {
-  const { readFile } = await import("node:fs/promises");
-  const { dirname, join } = await import("node:path");
-  const { checked } = await import("../src/tmux.ts");
   const tools = new Map<string, any>(),
     events = new Map<string, any>(),
     entries: any[] = [],
@@ -110,7 +140,7 @@ test("exit watch reports a lost pane while another job remains alive", async () 
   extension(pi);
   await events.get("session_start")({}, ctx);
   const execute = async (name: string, p: unknown) =>
-    (await tools.get(name).execute("call", p, undefined, undefined, ctx)).details;
+    track((await tools.get(name).execute("call", p, undefined, undefined, ctx)).details);
   try {
     const first = await execute("bgmon_start", { command: "sleep 30" });
     const second = await execute("bgmon_start", { command: "sleep 30" });
@@ -124,16 +154,8 @@ test("exit watch reports a lost pane while another job remains alive", async () 
       intervalSeconds: 1,
     });
     assert.ok(watch.id);
-    const registry = JSON.parse(
-      await readFile(join(dirname(first.socket), "registry.json"), "utf8"),
-    );
-    await checked([
-      "-S",
-      first.socket,
-      "kill-pane",
-      "-t",
-      registry.jobs.find((j: any) => j.id === first.id).pane,
-    ]);
+    const panes = await checked(["-S", first.socket, "list-panes", "-a", "-F", "#{pane_id}"]);
+    await checked(["-S", first.socket, "kill-pane", "-t", panes.stdout.trim().split("\n")[0]]);
     const deadline = Date.now() + 6000;
     while (!messages.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
     assert.equal(messages.length, 1);
@@ -181,11 +203,11 @@ function runtime(session: string, entries: any[] = []) {
     start: () => events.get("session_start")({}, ctx),
     close: () => events.get("session_shutdown")({}, ctx),
     call: async (name: string, p: unknown) =>
-      (await tools.get(name).execute("call", p, undefined, undefined, ctx)).details,
+      track((await tools.get(name).execute("call", p, undefined, undefined, ctx)).details),
   };
 }
 
-test("shared identities, independent subscriptions, lifecycle and same-session recovery", async () => {
+test("shared identities and subscriptions end with the live process binding", async () => {
   const a = runtime("owner-shared"),
     b = runtime("subscriber-shared"),
     c = runtime("other-shared");
@@ -251,11 +273,12 @@ test("shared identities, independent subscriptions, lifecycle and same-session r
     const recovered = runtime("owner-shared", a.entries);
     await recovered.start();
     try {
-      assert.ok((await recovered.call("bgmon_inspect", {})).some((j: any) => j.id === id));
+      assert.deepEqual(await recovered.call("bgmon_inspect", {}), []);
       assert.equal(
-        (await recovered.call("bgmon_control", { action: "server_stop", id })).stopped,
-        true,
+        (await recovered.call("bgmon_inspect", { logRef: job.logRef })).state,
+        "unknown",
       );
+      assert.deepEqual(await recovered.call("bgmon_watch", { action: "list" }), []);
       id = "";
     } finally {
       await recovered.close();
@@ -423,7 +446,7 @@ test("last close racing a new session serializes lock release and recovery", asy
   }
 });
 
-test("broken own locator cannot block known shared identities or watch cleanup", async () => {
+test("obsolete locator is ignored and cannot block shared identities", async () => {
   const a = runtime("healthy-owner"),
     b = runtime("bad-locator");
   await a.start();
@@ -438,7 +461,7 @@ test("broken own locator cannot block known shared identities or watch cleanup",
       customType: "pi-background-monitor:locator:v1",
       data: { session: "bad-locator", locator: { invalid: true } },
     });
-    assert.match((await b.call("bgmon_inspect", {})).error, /Invalid background server locator/);
+    assert.ok(Array.isArray(await b.call("bgmon_inspect", {})));
     assert.equal((await b.call("bgmon_inspect", { id: job.id })).state, "running");
     assert.equal(
       (await b.call("bgmon_watch", { action: "update", watchId: watch.id, intervalSeconds: 4 }))
@@ -460,52 +483,42 @@ test("broken own locator cannot block known shared identities or watch cleanup",
   }
 });
 
-test("shared monitor capacity preserves server cleanup and permits reuse", async () => {
-  // Create a recoverable owner before filling the process index, then drop the index.
-  const saved = runtime("capacity-saved");
-  await saved.start();
-  const old = await saved.call("bgmon_start", { command: "sleep 60" });
-  if (!old.id) {
-    await saved.call("bgmon_control", { action: "server_stop" });
-    await saved.close();
-    assert.fail(JSON.stringify(old));
-  }
-  await saved.close();
+test("shared monitor capacity frees a slot when a retained job is forgotten", async () => {
   const owners = Array.from({ length: 8 }, (_, i) => runtime(`capacity-owner-${i}`));
-  const extra = runtime("capacity-saved", saved.entries);
+  const extra = runtime("capacity-extra");
   const ids: string[] = [];
-  let extraStarted = false;
   try {
     for (const owner of owners) {
       await owner.start();
       for (let j = 0; j < 8; j++) {
         const job = await owner.call("bgmon_start", { command: "exit 0" });
         assert.ok(job.id, JSON.stringify(job));
+        assert.equal(job.state, "running", JSON.stringify(job));
         ids.push(job.id);
       }
     }
-    assert.equal(ids.length, 64);
     await extra.start();
-    extraStarted = true;
-    assert.match((await extra.call("bgmon_inspect", {})).error, /Maximum 64 shared monitors/);
+    assert.equal((await extra.call("bgmon_inspect", {})).length, 64);
     assert.match(
       (await extra.call("bgmon_start", { command: "exit 0" })).error,
       /Maximum 64 shared monitors/,
     );
-    // This direct cleanup must work even though recovery cannot index its retained job.
-    assert.equal((await extra.call("bgmon_control", { action: "server_stop" })).stopped, true);
+    let seen: any = {};
+    for (let i = 0; i < 200 && seen.captureHealth !== "complete"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      seen = await extra.call("bgmon_inspect", { id: ids[0] });
+    }
+    assert.equal(seen.captureHealth, "complete");
     assert.equal(
-      (await extra.call("bgmon_control", { action: "server_stop", id: ids[0] })).stopped,
-      true,
+      (await extra.call("bgmon_control", { action: "forget", id: ids[0] })).forgotten,
+      ids[0],
     );
     const retry = await extra.call("bgmon_start", { command: "exit 0" });
-    assert.ok(retry.id, JSON.stringify(retry));
-    assert.equal((await extra.call("bgmon_inspect", {})).length, 57);
+    assert.equal(retry.state, "running", JSON.stringify(retry));
+    assert.equal((await extra.call("bgmon_inspect", {})).length, 64);
   } finally {
-    // Every stop targets only the private server owned by the corresponding runtime.
     for (const owner of owners) await owner.call("bgmon_control", { action: "server_stop" });
     for (const owner of owners) await owner.close();
-    if (!extraStarted) await extra.start();
     await extra.call("bgmon_control", { action: "server_stop" });
     await extra.close();
   }
@@ -537,7 +550,7 @@ test("empty owner backend cap releases a slot on session shutdown", async () => 
   }
 });
 
-test("shared watch capacity frees slots and server stop invalidates all subscriptions", async () => {
+test("shared watch capacity frees slots and stopped jobs retain subscriptions", async () => {
   const owner = runtime("watch-cap-owner");
   const watchers = Array.from({ length: 9 }, (_, i) => runtime(`watch-cap-${i}`));
   await owner.start();
@@ -575,8 +588,8 @@ test("shared watch capacity frees slots and server stop invalidates all subscrip
     });
     assert.ok(retry.id, JSON.stringify(retry));
     assert.equal((await owner.call("bgmon_control", { action: "server_stop" })).stopped, true);
-    for (const watcher of watchers)
-      assert.deepEqual(await watcher.call("bgmon_watch", { action: "list" }), []);
+    assert.equal((await watchers[0].call("bgmon_watch", { action: "list" })).length, 7);
+    assert.equal((await watchers[8].call("bgmon_watch", { action: "list" })).length, 1);
   } finally {
     await owner.call("bgmon_control", { action: "server_stop" });
     for (const watcher of watchers) await watcher.close();
@@ -597,10 +610,15 @@ test("bgmon interface validates action arguments and command routing", async () 
       "command",
       "id",
     ]);
-    assert.deepEqual(Object.keys(a.tools.get("bgmon_inspect").parameters.properties), ["id"]);
+    assert.deepEqual(Object.keys(a.tools.get("bgmon_inspect").parameters.properties), [
+      "id",
+      "after",
+      "logRef",
+    ]);
     assert.deepEqual(Object.keys(a.tools.get("bgmon_control").parameters.properties), [
       "action",
       "id",
+      "logRef",
     ]);
     assert.deepEqual(Object.keys(a.tools.get("bgmon_watch").parameters.properties), [
       "action",
@@ -680,11 +698,10 @@ test("session monitor limits persist and never delete existing jobs", async () =
     const b = runtime("limits", entries);
     await b.start();
     try {
-      assert.equal((await b.call("bgmon_inspect", {})).length, 2);
-      assert.match(
-        (await b.call("bgmon_start", { command: "exit 0" })).error,
-        /Maximum 2 retained/,
-      );
+      assert.equal((await b.call("bgmon_inspect", {})).length, 0);
+      const fresh = await b.call("bgmon_start", { command: "sleep 30" });
+      assert.equal(fresh.state, "running");
+      assert.match((await b.call("bgmon_start", { command: "exit 0" })).error, /Maximum 1 running/);
     } finally {
       await b.call("bgmon_control", { action: "server_stop" });
       await b.close();
@@ -948,7 +965,8 @@ test("session shutdown closes an open output view and leaves the job detached", 
     await command;
     recovered = runtime("dashboard-shutdown", a.entries);
     await recovered.start();
-    assert.equal((await recovered.call("bgmon_inspect", { id: job.id })).state, "running");
+    assert.match((await recovered.call("bgmon_inspect", { id: job.id })).error, /Unknown monitor/);
+    assert.equal((await recovered.call("bgmon_inspect", { logRef: job.logRef })).state, "unknown");
   } finally {
     if (!recovered) {
       recovered = runtime("dashboard-shutdown", a.entries);
@@ -960,7 +978,7 @@ test("session shutdown closes an open output view and leaves the job detached", 
   }
 });
 
-test("custom monitor IDs are shared, unique, safe, and recoverable", async () => {
+test("custom monitor IDs are shared and unique only for live indexed jobs", async () => {
   const a = runtime("named-owner"),
     b = runtime("named-other");
   await a.start();
@@ -995,8 +1013,15 @@ test("custom monitor IDs are shared, unique, safe, and recoverable", async () =>
     const reopened = runtime("named-owner", a.entries);
     await reopened.start();
     try {
-      assert.equal((await reopened.call("bgmon_inspect", { id: named.id })).state, "running");
-      assert.ok((await reopened.call("bgmon_inspect", {})).some((j: any) => j.id === generated.id));
+      assert.match(
+        (await reopened.call("bgmon_inspect", { id: named.id })).error,
+        /Unknown monitor/,
+      );
+      assert.deepEqual(await reopened.call("bgmon_inspect", {}), []);
+      assert.equal(
+        (await reopened.call("bgmon_inspect", { logRef: named.logRef })).state,
+        "unknown",
+      );
     } finally {
       await reopened.call("bgmon_control", { action: "server_stop" });
       await reopened.close();
@@ -1011,7 +1036,7 @@ test("custom monitor IDs are shared, unique, safe, and recoverable", async () =>
   }
 });
 
-test("a readable ID collision after index reset fails closed until the conflicting owner stops", async () => {
+test("historical references do not follow reused readable IDs", async () => {
   const a = runtime("collision-first"),
     b = runtime("collision-second");
   await a.start();
@@ -1024,17 +1049,17 @@ test("a readable ID collision after index reset fails closed until the conflicti
     const second = await b.call("bgmon_start", { command: "sleep 30", id: "deploy" });
     assert.equal(second.id, "deploy");
     await resumed.start();
-    for (const name of ["bgmon_inspect", "bgmon_control"]) {
-      const p = name === "bgmon_inspect" ? { id: "deploy" } : { action: "stop", id: "deploy" };
-      assert.match((await resumed.call(name, p)).error, /Duplicate monitor identity/);
-    }
-    assert.equal((await b.call("bgmon_inspect", { id: "deploy" })).state, "running");
-    assert.equal((await b.call("bgmon_control", { action: "server_stop" })).stopped, true);
-    assert.equal((await resumed.call("bgmon_inspect", { id: "deploy" })).state, "running");
+    assert.deepEqual(await resumed.call("bgmon_watch", { action: "list" }), []);
+    assert.equal(
+      (await resumed.call("bgmon_inspect", { id: "deploy" })).logRef.stream,
+      second.logRef.stream,
+    );
+    const historical = await resumed.call("bgmon_inspect", { logRef: first.logRef });
+    assert.equal(historical.state, "unknown");
+    assert.equal(historical.logRef.stream, first.logRef.stream);
   } finally {
     await b.call("bgmon_control", { action: "server_stop" });
     await b.close();
-    await resumed.call("bgmon_control", { action: "server_stop" });
     await resumed.close();
   }
 });
@@ -1116,5 +1141,104 @@ test("slow regex watch is removed with metadata-only notice and literal watches 
   } finally {
     await a.call("bgmon_control", { action: "server_stop" });
     await a.close();
+  }
+});
+
+test("completed historical logs can be deleted without reviving a monitor", async () => {
+  const owner = runtime("history-delete");
+  await owner.start();
+  const job = await owner.call("bgmon_start", { command: "echo done" });
+  try {
+    let seen: any = {};
+    for (let i = 0; i < 200 && seen.captureHealth !== "complete"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      seen = await owner.call("bgmon_inspect", { id: job.id });
+    }
+    assert.equal(seen.captureHealth, "complete");
+    assert.match(
+      (await owner.call("bgmon_control", { action: "delete_history", logRef: job.logRef })).error,
+      /Use forget/,
+    );
+    await owner.close();
+    const other = runtime("other-session");
+    await other.start();
+    try {
+      assert.ok(
+        (await other.call("bgmon_control", { action: "delete_history", logRef: job.logRef })).error,
+      );
+    } finally {
+      await other.close();
+    }
+    const resumed = runtime("history-delete", owner.entries);
+    await resumed.start();
+    try {
+      assert.deepEqual(await resumed.call("bgmon_inspect", {}), []);
+      assert.equal(
+        (await resumed.call("bgmon_control", { action: "delete_history", logRef: job.logRef }))
+          .deleted,
+        true,
+      );
+      assert.ok((await resumed.call("bgmon_inspect", { logRef: job.logRef })).error);
+    } finally {
+      await resumed.close();
+    }
+  } finally {
+    await owner.close();
+  }
+});
+
+test("a closed capture pipe does not authorize deleting a still-running producer", async () => {
+  const owner = runtime("history-live-producer");
+  await owner.start();
+  const job = await owner.call("bgmon_start", { command: "exec sleep 30" });
+  try {
+    const panes = await checked(["-S", job.socket, "list-panes", "-a", "-F", "#{pane_id}"]);
+    await checked(["-S", job.socket, "pipe-pane", "-t", panes.stdout.trim().split("\n")[0]]);
+    await owner.close();
+    const resumed = runtime("history-live-producer", owner.entries);
+    await resumed.start();
+    try {
+      let seen: any = {};
+      for (let i = 0; i < 200 && seen.captureHealth !== "complete"; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        seen = await resumed.call("bgmon_inspect", { logRef: job.logRef });
+      }
+      assert.equal(seen.captureHealth, "complete");
+      assert.equal(seen.state, "unknown");
+      assert.match(
+        (await resumed.call("bgmon_control", { action: "delete_history", logRef: job.logRef }))
+          .error,
+        /Producer stop is unverified/,
+      );
+    } finally {
+      await resumed.close();
+    }
+  } finally {
+    await owner.close();
+  }
+});
+
+test("explicit historical deletion reclaims a verified dead detached pane", async () => {
+  const owner = runtime("history-dead-pane");
+  await owner.start();
+  const job = await owner.call("bgmon_start", { command: "sleep 0.5; exit 7" });
+  try {
+    await owner.close();
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    const resumed = runtime("history-dead-pane", owner.entries);
+    await resumed.start();
+    try {
+      assert.deepEqual(await resumed.call("bgmon_inspect", {}), []);
+      assert.equal((await resumed.call("bgmon_inspect", { logRef: job.logRef })).state, "unknown");
+      assert.equal(
+        (await resumed.call("bgmon_control", { action: "delete_history", logRef: job.logRef }))
+          .deleted,
+        true,
+      );
+    } finally {
+      await resumed.close();
+    }
+  } finally {
+    await owner.close();
   }
 });

@@ -3,8 +3,15 @@ import { Type } from "typebox";
 import { type Binding, broker, type Delivery } from "./broker.ts";
 import { DEFAULT_LIMITS, dashboard, type Limits, validLimits } from "./ui.ts";
 
-const ENTRY = "pi-background-monitor:locator:v1";
+const ENTRY = "pi-background-monitor:logref:v2";
 const SETTINGS = "pi-background-monitor:settings:v1";
+const LOG_REF = Type.Object({
+  version: Type.Literal(1),
+  session: Type.String(),
+  owner: Type.String(),
+  stream: Type.String(),
+  slot: Type.Integer(),
+});
 export default function extension(pi: ExtensionAPI) {
   let binding: Binding | undefined;
   const dashboards = new Set<AbortController>();
@@ -136,38 +143,67 @@ export default function extension(pi: ExtensionAPI) {
     name: "bgmon_inspect",
     label: "Inspect bgmon monitors",
     description:
-      "List shared monitors when id is omitted, or inspect one monitor's bounded, untrusted output and state by id.",
+      "List live monitors, inspect one by id, or read a session-owned historical log by its explicit logRef. Output is bounded and untrusted.",
     parameters: Type.Object({
-      id: Type.Optional(Type.String({ description: "Monitor identity; omit to list monitors." })),
+      id: Type.Optional(Type.String({ description: "Live monitor identity." })),
+      after: Type.Optional(
+        Type.Object(
+          {
+            sequence: Type.Integer({ minimum: 0 }),
+            offset: Type.Integer({ minimum: 0, maximum: 16384 }),
+          },
+          {
+            description:
+              "Forward cursor from a previous log inspection; use {sequence: 0, offset: 0} for retained history.",
+          },
+        ),
+      ),
+      logRef: Type.Optional(LOG_REF),
     }),
     execute: async (_id, p) =>
       run(async () => {
-        fields(p, ["id"]);
+        fields(p, ["id", "logRef", "after"]);
         identity(p.id, "id");
-        return broker.action(get(), p.id === undefined ? "list" : "inspect", p);
+        if (p.id !== undefined && p.logRef !== undefined)
+          throw new Error("Choose id or logRef, not both");
+        if (p.after !== undefined && !p.id && !p.logRef)
+          throw new Error("after requires id or logRef");
+        return broker.action(
+          get(),
+          p.logRef ? "history" : p.id === undefined ? "list" : "inspect",
+          p,
+        );
       }),
   });
   pi.registerTool({
     name: "bgmon_control",
     label: "Control bgmon jobs",
     description:
-      "Stop or forget a monitor by id. server_stop stops ALL jobs in that monitor's owning server, or your session's server when id is omitted.",
+      "Stop or forget an indexed monitor by id; server_stop stops its owning server but retains logs. delete_history deletes a completed session-owned log by logRef.",
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal("stop"),
         Type.Literal("forget"),
         Type.Literal("server_stop"),
+        Type.Literal("delete_history"),
       ]),
       id: Type.Optional(
-        Type.String({ description: "Monitor identity; required except for server_stop." }),
+        Type.String({ description: "Monitor identity; required for stop or forget." }),
       ),
+      logRef: Type.Optional(LOG_REF),
     }),
     execute: async (_id, p) =>
       run(async () => {
-        fields(p, ["action", "id"]);
-        if (!["stop", "forget", "server_stop"].includes(p.action))
+        fields(p, ["action", "id", "logRef"]);
+        if (!["stop", "forget", "server_stop", "delete_history"].includes(p.action))
           throw new Error("Invalid control action");
-        identity(p.id, "id", p.action !== "server_stop");
+        if (p.action === "delete_history") {
+          if (!p.logRef || p.id !== undefined)
+            throw new Error("delete_history requires only logRef");
+        } else {
+          if (p.logRef !== undefined) throw new Error("logRef is only valid for delete_history");
+          identity(p.id, "id", p.action !== "server_stop");
+        }
         return broker.action(get(), p.action, p);
       }),
   });

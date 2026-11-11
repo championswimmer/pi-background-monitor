@@ -27,7 +27,6 @@ test("private server retains fast exit and asynchronous jobs", async () => {
     for (let i = 0; i < 50 && (await tm.status(pane)).state === "running"; i++)
       await new Promise((r) => setTimeout(r, 20));
     assert.deepEqual(await tm.status(pane), { state: "exited", exitCode: 7, signal: undefined });
-    assert.match((await tm.capture(pane)).stdout, /READY/);
     await writeFile(file, "sleep 2\n");
     const t = Date.now();
     const p2 = await tm.start(file, d.dir, false);

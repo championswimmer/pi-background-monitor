@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmod, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { quote } from "./output.ts";
+import { type StopProof, writeStopProof } from "./proof.ts";
 
 export type ClientResult = { code: number; stdout: string; stderr: string; truncated: boolean };
 /** Drain both pipes even after reaching limits; never terminate the server for excess output. */
@@ -85,7 +86,7 @@ export async function createDirectory(): Promise<{ dir: string; socket: string; 
   );
   return { dir, socket, token };
 }
-async function withTimeout<T>(operation: Promise<T>, timeout: number): Promise<T> {
+export async function withTimeout<T>(operation: Promise<T>, timeout: number): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([
@@ -159,6 +160,29 @@ export class Tmux {
   async releaseCaptureGate(path: string) {
     await writeFile(path, "", { mode: 0o600, flag: "wx" });
   }
+  private async cleanupGate(gate: string, knownPane?: string) {
+    if (!(await this.verify().catch(() => false))) return;
+    const listing = knownPane
+      ? `${knownPane}|${gate}`
+      : (await client(this.args("list-panes", "-a", "-F", "#{pane_id}|#{pane_start_command}")))
+          .stdout;
+    for (const row of listing.split("\n")) {
+      const [pane, ...command] = row.split("|");
+      if (!/^%\d+$/.test(pane) || !command.join("|").includes(gate)) continue;
+      // Match the unique generated gate atomically at the server before killing.
+      await client(
+        this.args(
+          "if-shell",
+          "-F",
+          "-t",
+          pane,
+          `#{m:*${gate}*,#{pane_start_command}}`,
+          `kill-pane -t ${pane}`,
+          "display-message -p gate-not-matched",
+        ),
+      ).catch(() => {});
+    }
+  }
   /** Install and verify the capture sink before allowing the user script to start. */
   async startCaptured(
     script: string,
@@ -166,6 +190,8 @@ export class Tmux {
     first: boolean,
     captureDir: string,
     runtime: string,
+    stream?: string,
+    onPane?: (pane: string, pid: number) => Promise<void>,
   ) {
     const nonce = randomBytes(24).toString("hex");
     const gate = join(this.dir, `${nonce}.gate`);
@@ -182,6 +208,11 @@ export class Tmux {
     let released = false;
     let acknowledged = false;
     try {
+      // A restarted tmux server can reuse pane IDs. Do not create it while an
+      // earlier supervisor might still target the same ID during finalization.
+      while (first && this.captureTimers.size && Date.now() < deadline)
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      if (first && this.captureTimers.size) throw new Error("Previous capture is still finalizing");
       await writeFile(
         gate,
         `for ((i=0;i<1500;i++)); do\n  if [ -f ${quote(release)} ]; then\n    rm -f ${quote(gate)} ${quote(release)}\n    : > ${quote(launched)} || exit 125\n    exec /bin/bash --noprofile --norc ${quote(script)}\n  fi\n  sleep 0.02\ndone\nrm -f ${quote(gate)} ${quote(release)}\nexit 125\n`,
@@ -189,7 +220,7 @@ export class Tmux {
       );
       await writeFile(
         bridge,
-        `exec ${quote(process.execPath)} ${quote(runtime)} ${quote(captureDir)} ${quote(nonce)} ${quote(nonce)}\n`,
+        `exec ${quote(process.execPath)} ${quote(runtime)} ${quote(captureDir)} ${quote(nonce)} ${quote(stream ?? nonce)}\n`,
         { mode: 0o600, flag: "wx" },
       );
       pane = await this.start(gate, cwd, first, remaining());
@@ -220,10 +251,21 @@ export class Tmux {
         }
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      const gateStatus = await this.status(pane, remaining());
+      await checked(
+        this.args("set-option", "-p", "-t", pane, "@pbm_stream", stream ?? nonce),
+        remaining(),
+      );
+      const info = await checked(
+        this.args("display-message", "-p", "-t", pane, "#{pane_pid}"),
+        remaining(),
+      );
+      const pid = Number(info.stdout.trim());
+      if (!Number.isSafeInteger(pid) || pid < 1) throw new Error("Invalid producer PID");
+      if (onPane) await onPane(pane, pid);
+      const gateStatus = await this.sourceStatus(pane, stream ?? nonce, pid, remaining());
       if (!ready || Date.now() >= deadline || gateStatus.state !== "running")
         throw new Error("Capture sink or launcher did not become ready in time");
-      this.superviseCapture(pane, captureDir, nonce);
+      this.superviseCapture(pane, captureDir, nonce, stream ?? nonce, pid);
       // Creating the release file may become visible even if the write rejects.
       released = true;
       await this.releaseCaptureGate(release);
@@ -248,8 +290,7 @@ export class Tmux {
       // possibly running command merely because its acknowledgement failed.
       if (released && pane) return { pane, launch: "unknown" as const };
       if (pane) this.stopCaptureSupervisor(pane);
-      if (pane && (await this.verify().catch(() => false)))
-        await client(this.args("kill-pane", "-t", pane));
+      await this.cleanupGate(gate, pane);
       throw error;
     } finally {
       // Once released, cleanup must never turn a successful start into an untracked job.
@@ -272,48 +313,55 @@ export class Tmux {
   stopCaptureSupervisors() {
     for (const pane of this.captureTimers.keys()) this.stopCaptureSupervisor(pane);
   }
-  captureResult(pane: string) {
-    return this.captureResults.get(pane);
+  cancelCaptureSupervisor(pane: string) {
+    this.stopCaptureSupervisor(pane);
   }
-  forgetCaptureResult(pane: string) {
-    this.captureResults.delete(pane);
+  async waitCapture(pane: string) {
+    const deadline = Date.now() + 5000;
+    while (this.captureTimers.has(pane) && Date.now() < deadline)
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    if (this.captureTimers.has(pane)) throw new Error("Capture is still finalizing");
   }
-  private superviseCapture(pane: string, dir: string, nonce: string) {
+  captureResult(dir: string) {
+    return this.captureResults.get(dir);
+  }
+  forgetCaptureResult(dir: string) {
+    this.captureResults.delete(dir);
+  }
+  private superviseCapture(pane: string, dir: string, nonce: string, stream: string, pid: number) {
     let busy = false;
     let finished = false;
-    let publicationFailed = false;
     let knownExit: { state: "exited"; exitCode?: number; signal?: string } | undefined;
     const control = { timer: undefined as unknown as NodeJS.Timeout, cancelled: false };
     const finish = () => {
       clearInterval(control.timer);
       finished = true;
     };
-    const finalize = async (result: object) => {
-      if (control.cancelled) return;
-      this.captureResults.set(pane, result);
-      if (publicationFailed) return;
-      const tmp = join(dir, "final.tmp");
-      try {
-        await withTimeout(writeFile(tmp, JSON.stringify(result), { mode: 0o600 }), 1000);
-        await withTimeout(rename(tmp, join(dir, "final.json")), 1000);
-      } catch {
-        // A timed-out rename can still finish later; never publish a newer result to
-        // disk afterward, but keep the authentic status in the live process.
-        publicationFailed = true;
-      }
+    const finalize = (result: object) => {
+      if (!control.cancelled) this.captureResults.set(dir, result);
     };
+    const prove = (state: StopProof["state"], status?: { exitCode?: number; signal?: string }) =>
+      withTimeout(writeStopProof(dir, { version: 1, stream, state, ...status }), 1000).catch(
+        () => {},
+      );
     const readState = async (timeout = 5000) =>
       JSON.parse(await withTimeout(readFile(join(dir, "capture.json"), "utf8"), timeout));
     const tick = async () => {
       if (busy) return;
       busy = true;
+      let stopped = false;
       try {
-        if (!(await this.verify())) {
+        if (!(await this.verify())) throw new Error("Producer server unavailable");
+        const status = await this.sourceStatus(pane, stream, pid);
+        if (status.state === "changed" || status.state === "lost") {
           finish();
-          await finalize({ state: "lost", capture: "unknown" });
+          await finalize({
+            state: "lost",
+            capture: "unknown",
+            error: "Producer identity unavailable or changed",
+          });
           return;
         }
-        const status = await this.status(pane);
         if (status.state === "exited") knownExit = status;
         const state = await readState();
         if (state.nonce !== nonce) throw new Error("Capture identity mismatch");
@@ -329,26 +377,31 @@ export class Tmux {
           ) {
             // Only the verified private server and its recorded pane are ever targeted.
             if (control.cancelled) return;
-            await checked(this.args("kill-pane", "-t", pane));
+            await this.sourceOperation(pane, stream, pid, "running", "kill");
+            stopped = true;
+            await prove("capture_failed");
             finish();
             await finalize({
               state: "capture_failed",
               capture: "failed",
               lastSinkHealth: state.health,
             });
+          } else if (
+            (this.captureResults.get(dir) as { state?: string } | undefined)?.state ===
+            "capture_unverified"
+          ) {
+            this.captureResults.delete(dir);
           }
           return;
         }
-        finish();
-        if (status.state === "lost") {
-          await finalize({ state: "lost", capture: "unknown" });
-          return;
-        }
-        // Dead retained panes keep their pipe open; remove the owned pane only after
-        // recording its status, then wait boundedly for the sink to drain and close.
+        // tmux checks the dead state, stream and original PID atomically before
+        // removing the pane, so a respawned replacement cannot be killed.
         await finalize({ ...status, capture: "draining" });
         if (control.cancelled) return;
-        await checked(this.args("kill-pane", "-t", pane));
+        await this.sourceOperation(pane, stream, pid, "exited", "kill");
+        stopped = true;
+        await prove("exited", { exitCode: status.exitCode, signal: status.signal });
+        finish();
         const deadline = Date.now() + 5000;
         let health = state.health;
         while (health === "ready" && Date.now() < deadline) {
@@ -357,15 +410,32 @@ export class Tmux {
         }
         await finalize({ ...status, capture: health === "complete" ? "complete" : "incomplete" });
       } catch (error) {
-        finish();
-        // Re-verify ownership before fail-stop even when inspection failed.
-        if ((await this.verify().catch(() => false)) && !control.cancelled)
-          await client(this.args("kill-pane", "-t", pane)).catch(() => {});
-        await finalize({
-          ...(knownExit ?? { state: "capture_failed" }),
-          capture: "incomplete",
-          error: String(error).slice(0, 512),
-        });
+        let killed = stopped;
+        if (!killed && !control.cancelled) {
+          try {
+            await this.sourceOperation(pane, stream, pid, knownExit ? "exited" : "either", "kill");
+            killed = true;
+          } catch {
+            /* A changed/unavailable source is never targeted without proof. */
+          }
+        }
+        if (killed) {
+          finish();
+          if (knownExit)
+            await prove("exited", { exitCode: knownExit.exitCode, signal: knownExit.signal });
+          else await prove("capture_failed");
+          await finalize({
+            ...(knownExit ?? { state: "capture_failed" }),
+            capture: "incomplete",
+            error: String(error).slice(0, 512),
+          });
+        } else {
+          await finalize({
+            state: "capture_unverified",
+            capture: "unknown",
+            error: String(error).slice(0, 512),
+          });
+        }
       } finally {
         busy = false;
         if (finished && this.captureTimers.get(pane) === control) this.captureTimers.delete(pane);
@@ -376,6 +446,76 @@ export class Tmux {
     }, 250);
     control.timer.unref();
     this.captureTimers.set(pane, control);
+  }
+  private sourceCondition(
+    pane: string,
+    stream: string,
+    pid: number,
+    expected: "running" | "exited" | "either",
+  ) {
+    if (
+      !/^%\d+$/.test(pane) ||
+      !/^(?:[a-f0-9]{24}|[a-f0-9]{48})$/.test(stream) ||
+      !Number.isSafeInteger(pid) ||
+      pid < 1
+    )
+      throw new Error("Invalid source identity");
+    const identity = `#{&&:#{==:#{@pbm_stream},${stream}},#{==:#{pane_pid},${pid}}}`;
+    return expected === "either"
+      ? identity
+      : `#{&&:${identity},#{==:#{pane_dead},${expected === "exited" ? 1 : 0}}}`;
+  }
+  async sourceStatus(pane: string, stream: string, pid: number, timeout = 5000) {
+    this.sourceCondition(pane, stream, pid, "either");
+    const r = await client(
+      this.args(
+        "display-message",
+        "-p",
+        "-t",
+        pane,
+        "#{pane_dead}|#{pane_pid}|#{@pbm_stream}|#{pane_dead_status}|#{pane_dead_signal}",
+      ),
+      timeout,
+    );
+    if (r.code) {
+      const panes = await checked(this.args("list-panes", "-a", "-F", "#{pane_id}"), timeout);
+      if (!panes.stdout.trim().split("\n").includes(pane)) return { state: "lost" as const };
+      throw new Error("Unable to inspect producer pane");
+    }
+    const [dead, actualPid, actualStream, status, signal] = r.stdout.trim().split("|");
+    if (actualPid !== String(pid) || actualStream !== stream) return { state: "changed" as const };
+    if (dead === "1")
+      return {
+        state: "exited" as const,
+        exitCode: /^\d+$/.test(status) ? Number(status) : undefined,
+        signal: signal || undefined,
+      };
+    if (dead === "0") return { state: "running" as const };
+    throw new Error("Unknown producer state");
+  }
+  async sourceOperation(
+    pane: string,
+    stream: string,
+    pid: number,
+    expected: "running" | "exited" | "either",
+    operation: "kill" | "interrupt",
+  ) {
+    const condition = this.sourceCondition(pane, stream, pid, expected);
+    if (!(await this.verify())) throw new Error("Producer server unavailable");
+    const action = operation === "kill" ? `kill-pane -t ${pane}` : `send-keys -t ${pane} C-c`;
+    const result = await checked(
+      this.args(
+        "if-shell",
+        "-F",
+        "-t",
+        pane,
+        condition,
+        action,
+        "display-message -p pbm-source-mismatch",
+      ),
+    );
+    if (result.stdout.includes("pbm-source-mismatch"))
+      throw new Error("Producer identity or state changed");
   }
   async status(pane: string, timeout = 5000) {
     const r = await client(
@@ -399,9 +539,5 @@ export class Tmux {
       : dead === "0"
         ? { state: "running" as const }
         : { state: "lost" as const };
-  }
-  async capture(pane: string) {
-    const r = await checked(this.args("capture-pane", "-p", "-t", pane, "-S", "-200"));
-    return r;
   }
 }

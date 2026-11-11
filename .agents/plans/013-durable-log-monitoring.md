@@ -1,6 +1,6 @@
 # 013 — Durable logs and live-session filtered triggers
 
-Status: **proposed; implementation not started**. Revised 2026-11-11 against checkout `2a63820d` / package 0.1.0. The user permits wholesale replacement of snapshot monitoring, with **no backward-compatibility requirement**.
+Status: **implementation in progress**. Revised 2026-11-11 against checkout `2a63820d` / package 0.1.0. The user permits wholesale replacement of snapshot monitoring, with **no backward-compatibility requirement**.
 
 ## Outcome, scope and recommendation
 
@@ -92,7 +92,7 @@ There are **no subscriber directories, watch checkpoints or durable outboxes**.
 5. Serialize writes; sync/publish a commit watermark at most 250 ms or 64 KiB apart and on clean EOF. Readers consume only complete validated frames through the published watermark. Atomic `capture.json` holds first retained sequence, committed tail, health/heartbeat and finalization. This does not promise power-loss-proof storage.
 6. Treat output EOF, pane exit and pipe failure separately. Reconcile verified tmux status with a bounded final drain (five seconds); record authentic exit code/signal when known, otherwise explicit incomplete/unknown state, never invented exit zero. Heartbeat/pipe/status checks expose vanished or stuck capture.
 7. On sink failure, disk/write timeout or queue exhaustion, fail visibly and request stop of **only the verified owned pane**; retain captured data. Do not silently attach a replacement sink and pretend continuity. If storage cannot record an error, live health checks report uncertainty. Detached descendants may survive stop.
-8. `stop` uses the existing bounded Ctrl-C/escalation policy and final drain. `server_stop` stops execution but retains logs. `forget` explicitly removes a nonrunning job's retained data/reservation and marks dependent live watches `source_removed`. Historical cleanup requires proven ownership and must refuse a still-live/uncertain capture source; no automatic orphan adoption/deletion.
+8. `stop` uses the existing bounded Ctrl-C/escalation policy and final drain. `server_stop` stops execution but retains logs. `forget` explicitly removes a nonrunning job's retained data/reservation and marks dependent live watches `source_removed`. Historical cleanup requires proven ownership and must refuse a still-live/uncertain capture source. An explicit delete request may verify an old owned tmux pane is dead, atomically remove that dead pane to drain its pipe, and then reclaim its log; this does not adopt a live controller or restore monitoring. No automatic orphan adoption/deletion.
 
 Startup gating is mandatory: a snapshot cannot backfill missed initial bytes accurately. The sink is a capture implementation detail, **not a filter daemon or Pi supervisor**. On binding/process teardown, detach without introducing any wait-for-return, matching, restart or alert-recovery protocol.
 
@@ -112,7 +112,7 @@ Centralize constants in `src/limits.ts` and test them:
 | Live event storage | 128 detailed events per binding plus one bounded coalesced summary per watch |
 | Model delivery | ≤2 KiB batch, at most one batch per ten seconds and one outstanding submitted batch per delivery mode/binding |
 
-Storage slots are simple atomic exclusive reservations so repeated sessions cannot accumulate unlimited logs. They account for capacity only, not discovery/adoption. Refuse creation with explicit cleanup instructions when full. Do not silently reclaim old owners. Bound scripts, manifests and runtime copies as well; account for temporary files during commit/rotation. These are logical payload bounds, not exact filesystem allocation/free-space guarantees.
+Storage slots are simple atomic exclusive reservations so repeated sessions cannot accumulate unlimited logs. They account for capacity only, not discovery/adoption. Refuse creation with explicit cleanup instructions when full. Do not silently reclaim old owners. An abrupt crash between reservation and publication of its reference, or midway through deletion, can strand a slot; without out-of-scope restart recovery, an operator must verify no Pi or owned tmux process still uses the data before manually cleaning the corresponding reservation. Bound scripts, manifests and runtime copies as well; account for temporary files during commit/rotation. These are logical payload bounds, not exact filesystem allocation/free-space guarantees.
 
 Rolling retention does not pin segments for slow readers. Delete only complete oldest segments; readers tolerate concurrent eviction and report a visible `history_gap` with known/unknown lost range. Reset partial-line state and skip to the next delimiter after a gap; never manufacture a cross-gap match. This applies to **live slow subscribers**, not offline catch-up. Exited retained logs remain until explicit forget within the slot cap.
 
@@ -181,8 +181,8 @@ Acceptance: no user command executes before readiness; `FIRST` and `LAST` are ca
 
 Depends on Phase 1.
 
-- [ ] Implement private persistent log store, bounded slots/metadata/runtime, frame publication, rotation, safe concurrent reads and explicit gaps/incomplete state.
-- [ ] Replace inspect/UI snapshot reads and final-output caches with journal pagination. Separate live controllers from explicit read-only historical references; remove automatic controller/monitor recovery.
+- [x] Implement private persistent log store, bounded slots/metadata/runtime, frame publication, rotation, safe concurrent reads and explicit gaps/incomplete state.
+- [x] Replace inspect/UI snapshot reads and final-output caches with journal pagination. Separate live controllers from explicit read-only historical references; remove automatic controller/monitor recovery.
 - [ ] Unit/fault tests: Unicode/binary, truncated/corrupt frames and metadata, sequence gaps, partial writes, rotation during reads, missing socket, path/symlink/uid/mode rejection, full storage and cleanup refusal for uncertain running sources.
 - [ ] Verify completed logs remain readable without a socket or registering live monitors; repeat live-process sessions cannot bypass the storage-slot cap. Concurrent reservation tests use isolated test roots.
 
@@ -231,8 +231,8 @@ Acceptance: implemented behavior, tests and docs agree. Review focuses on owners
 ## Material risks and verification record
 
 - `pipe-pane` has tmux-dependent buffering/EOF behavior. Gating prevents the initial race, not all failure loss. Missing/stalled capture must be visible; retention and slow-reader gaps remain possible. On tested tmux 3.6 a retained dead pane keeps its pipe open; the live supervisor records exit status and removes that owned pane before bounded drain. The gate acknowledges an exec attempt, not execution of the application; if acknowledgement is unavailable after release the pane must stay tracked with an unknown launch result.
-- Fail-stop on storage/queue failure can interrupt valuable work and cannot guarantee killing detached descendants. State this prominently; verify only the private owned pane is targeted.
+- Fail-stop on storage/queue failure can interrupt valuable work and cannot guarantee killing detached descendants. State this prominently; verify only the private owned pane is targeted. A closed capture pipe alone does not prove its producer stopped: deletion must require both a closed capture and a validated record of verified pane/server stop. Pre-release startup failures may be rolled back as unstarted; missing or uncertain evidence must not be silently reclaimed.
 - Durable logs retain secrets longer than snapshots; private permissions, explicit deletion and metadata-only automatic alerts are mandatory. Same-user malicious processes remain outside the security boundary.
 - This plan assumes subagents share the running Pi process/broker. Independent Pi processes are not silently supported; a future requirement would change sharing, not justify adding recovery now.
 - Log sync/publication improves committed-read consistency but does not guarantee power-loss-proof storage. No exactly-once delivery/actions claim. In-memory events intentionally disappear on binding/process teardown. Startup/drain use application-level deadlines, but Node cannot forcibly cancel every in-flight filesystem operation or guarantee a hard deadline against a hung kernel/filesystem; timed-out publication is explicitly uncertain and retains known exit status in live memory.
-- Phase 1 prototype: focused real-tmux tests and a 4 MiB burst passed on Linux with tmux 3.6 / Node 26; the burst is one non-faulted run, not a losslessness guarantee. Startup, sink-crash, rotation and drain-failure regressions passed. Independent review identified and prompted fixes for gate, release, rotation and finalization races. macOS, tmux 3.2 and Node 22 have not been run. The prototype is not yet wired to public tools; later phases and release validation remain outstanding.
+- Phase 1 and 2: Linux/tmux 3.6/Node 26 checks and 51 tests passed, including capture faults, private ownership, cursor gaps, historical cleanup, pane reuse, stalled drain and an unlinked socket. Independent reviews prompted lifecycle and retention fixes. Snapshot predicates remain until Phase 3; UI/delivery and release validation remain outstanding. macOS, tmux 3.2 and Node 22 have not been run.

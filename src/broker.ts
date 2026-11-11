@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
-import { Manager, validId } from "./manager.ts";
+import { type LogCursor, Manager, validId } from "./manager.ts";
 import { sanitize } from "./output.ts";
 import { RegexMatcher } from "./regex.ts";
+import type { LogRef } from "./storage.ts";
 
 type Delivery = "ui" | "nextTurn" | "wake";
 type Binding = {
@@ -39,6 +40,8 @@ export type WatchOptions = {
   intervalSeconds?: number;
   ttlSeconds?: number;
   once?: boolean;
+  logRef?: LogRef;
+  after?: LogCursor;
 };
 
 class Broker {
@@ -104,13 +107,6 @@ class Broker {
     if (!owner) throw new Error("Unknown monitor identity");
     return owner;
   }
-  private removeOwner(owner: Owner) {
-    for (const [id, o] of this.monitors)
-      if (o === owner) {
-        this.monitors.delete(id);
-        for (const [wid, w] of this.watches) if (w.job === id) this.watches.delete(wid);
-      }
-  }
   private async releaseEmptyOwner(owner: Owner) {
     if (owner.binding || [...this.monitors.values()].includes(owner)) return;
     for (const [session, candidate] of this.owners)
@@ -173,6 +169,27 @@ class Broker {
   action(binding: Binding, action: string, p: WatchOptions) {
     return this.run(async () => {
       if (!binding.active) throw new Error("No active Pi session");
+      if (action === "history" || action === "delete_history") {
+        const ref = p.logRef;
+        if (!ref) throw new Error("A log reference is required");
+        if (
+          action === "delete_history" &&
+          [...this.monitors.values()].some((owner) => owner.manager.hasRef(ref))
+        )
+          throw new Error("Use forget for an indexed monitor");
+        const historical = new Manager(
+          binding.session,
+          () => undefined,
+          () => {},
+        );
+        try {
+          if (action === "history")
+            return await historical.run(() => historical.inspectHistorical(ref, p.after));
+          return await historical.run(() => historical.deleteHistorical(ref));
+        } finally {
+          await historical.close();
+        }
+      }
       if (action === "list") {
         await this.recover(binding);
         const result = [];
@@ -198,13 +215,11 @@ class Broker {
         await this.recover(binding);
       if (action === "server_stop") {
         const owner = p.id ? this.find(p.id) : this.owner(binding);
-        const r = await owner.manager.run(() => owner.manager.serverStop());
-        this.removeOwner(owner);
-        await this.releaseEmptyOwner(owner);
-        return r;
+        return owner.manager.run(() => owner.manager.serverStop());
       }
       const owner = this.find(p.id);
-      if (action === "inspect") return owner.manager.run(() => owner.manager.inspect(p.id!));
+      if (action === "inspect")
+        return owner.manager.run(() => owner.manager.inspect(p.id!, p.after));
       if (action === "stop") return owner.manager.run(() => owner.manager.stop(p.id!));
       if (action === "forget") {
         const r = await owner.manager.run(() => owner.manager.forget(p.id!));
@@ -331,9 +346,10 @@ class Broker {
             const state = snapshot.state;
             const text =
               "untrustedOutput" in snapshot ? (snapshot.untrustedOutput?.text ?? "") : "";
+            const terminal = state !== "running" && state !== "capture_unverified";
             const value =
               w.kind === "exit"
-                ? state !== "running"
+                ? terminal
                 : w.kind === "contains"
                   ? text.includes(w.pattern!)
                   : w.kind === "regex"
@@ -354,7 +370,7 @@ class Broker {
               );
               if (w.once || w.kind === "exit") this.watches.delete(w.id);
             }
-            if (state !== "running" && w.kind !== "exit") this.watches.delete(w.id);
+            if (terminal && w.kind !== "exit") this.watches.delete(w.id);
           } catch {
             if (w.kind === "regex" && w.subscriber.active && this.watches.get(w.id) === w)
               w.subscriber.notify(

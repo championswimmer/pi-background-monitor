@@ -19,6 +19,8 @@ type Snapshot = {
   timestamp?: string;
   untrustedOutput?: { text: string; truncated: boolean };
   clientTruncated?: boolean;
+  gap?: boolean;
+  captureHealth?: string;
 };
 type Viewer = { inspect: (id: string) => Promise<unknown>; signal: AbortSignal };
 type Job = { id: string; state: string; command?: string };
@@ -205,7 +207,7 @@ export async function dashboard(
                   .flatMap((line) =>
                     line ? wrapTextWithAnsi(line, Math.max(1, width - 2)) : [""],
                   );
-          // capture-pane includes unused screen rows; trailing blanks would hide short output.
+          // Trailing blanks would hide short output in the viewer.
           while (output.length && !output[output.length - 1].trim()) output.pop();
           const capacity = Math.max(1, rows - 12);
           maxTop = Math.max(0, output.length - capacity);
@@ -213,6 +215,11 @@ export async function dashboard(
           const body = output.slice(displayedTop, displayedTop + capacity);
           const flags =
             snapshot?.untrustedOutput?.truncated || snapshot?.clientTruncated ? " · truncated" : "";
+          const warning = snapshot?.gap
+            ? "history gap"
+            : snapshot?.captureHealth && !["ready", "complete"].includes(snapshot.captureHealth)
+              ? `capture ${safe(snapshot.captureHealth)}`
+              : "";
           const lines = [
             ...tabs,
             theme.fg(
@@ -221,9 +228,13 @@ export async function dashboard(
             ),
             theme.fg(
               "muted",
-              `Read-only snapshot · updated ${safe(snapshot?.timestamp ?? lastUpdate ?? "never")}`,
+              `Read-only log · updated ${safe(snapshot?.timestamp ?? lastUpdate ?? "never")}`,
             ),
-            error ? theme.fg("error", `Refresh failed: ${safe(error)}`) : "",
+            error
+              ? theme.fg("error", `Refresh failed: ${safe(error)}`)
+              : warning
+                ? theme.fg("error", warning)
+                : "",
             ...(body.length
               ? body
               : [

@@ -77,9 +77,12 @@ try {
   pendingAt = 0;
 } catch (error) {
   pendingAt = Date.now();
-  state.health = "failed";
-  state.error = String(error).slice(0, 1024);
-  try { await publish(); } catch { /* Storage may be unavailable. */ }
+  try {
+    if (file) { await file.close(); file = undefined; }
+    state.health = "failed";
+    state.error = String(error).slice(0, 1024);
+    await publish();
+  } catch { /* A failed close or unavailable storage leaves capture uncertain. */ }
   process.exitCode = 1;
 } finally {
   if (file) {
