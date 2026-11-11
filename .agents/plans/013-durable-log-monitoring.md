@@ -170,7 +170,7 @@ Acceptance: this plan proposes implementation only. No monitor/session recovery,
 
 ### Phase 1 — Prove startup capture and failure behavior
 
-- [ ] Prototype private-server gate + pipe sink and focused integration tests before rewriting public tools.
+- [x] Prototype private-server gate + pipe sink and focused integration tests before rewriting public tools.
 - [ ] Verify first/last output, zero-output command, quick exit 7, byte order, readiness, pipe presence and bounded EOF/status finalization.
 - [ ] Inject missing/dead sink before release and sink/tmux/write failure afterward; test private-target fail-stop/rollback, never snapshot fallback.
 - [ ] Check tmux 3.2/current Linux/macOS behavior, Bash 3.2-compatible gate, quoting/format-like paths, and capture independence from mutable package files.
@@ -230,9 +230,9 @@ Acceptance: implemented behavior, tests and docs agree. Review focuses on owners
 
 ## Material risks and verification record
 
-- `pipe-pane` has tmux-dependent buffering/EOF behavior. Gating prevents the initial race, not all failure loss. Missing/stalled capture must be visible; retention and slow-reader gaps remain possible.
+- `pipe-pane` has tmux-dependent buffering/EOF behavior. Gating prevents the initial race, not all failure loss. Missing/stalled capture must be visible; retention and slow-reader gaps remain possible. On tested tmux 3.6 a retained dead pane keeps its pipe open; the live supervisor records exit status and removes that owned pane before bounded drain. The gate acknowledges an exec attempt, not execution of the application; if acknowledgement is unavailable after release the pane must stay tracked with an unknown launch result.
 - Fail-stop on storage/queue failure can interrupt valuable work and cannot guarantee killing detached descendants. State this prominently; verify only the private owned pane is targeted.
 - Durable logs retain secrets longer than snapshots; private permissions, explicit deletion and metadata-only automatic alerts are mandatory. Same-user malicious processes remain outside the security boundary.
 - This plan assumes subagents share the running Pi process/broker. Independent Pi processes are not silently supported; a future requirement would change sharing, not justify adding recovery now.
-- Log sync/publication improves committed-read consistency but does not guarantee power-loss-proof storage. No exactly-once delivery/actions claim. In-memory events intentionally disappear on binding/process teardown.
-- Completed: code/guidance/lifecycle inspection and this revised proposal. Not completed: implementation, capture experiment, runtime/stress/platform tests, package smoke test or release changes. Documentation publishing checks are recorded in the task handback, not misrepresented as runtime validation.
+- Log sync/publication improves committed-read consistency but does not guarantee power-loss-proof storage. No exactly-once delivery/actions claim. In-memory events intentionally disappear on binding/process teardown. Startup/drain use application-level deadlines, but Node cannot forcibly cancel every in-flight filesystem operation or guarantee a hard deadline against a hung kernel/filesystem; timed-out publication is explicitly uncertain and retains known exit status in live memory.
+- Phase 1 prototype: focused real-tmux tests and a 4 MiB burst passed on Linux with tmux 3.6 / Node 26; the burst is one non-faulted run, not a losslessness guarantee. Startup, sink-crash, rotation and drain-failure regressions passed. Independent review identified and prompted fixes for gate, release, rotation and finalization races. macOS, tmux 3.2 and Node 22 have not been run. The prototype is not yet wired to public tools; later phases and release validation remain outstanding.
