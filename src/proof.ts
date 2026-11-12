@@ -53,6 +53,7 @@ export async function writeStopEvidence(
   writing.set(dir, operation);
   try {
     await operation;
+    clearStopEvidence(dir, entry);
   } finally {
     if (writing.get(dir) === operation) writing.delete(dir);
   }

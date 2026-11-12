@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { quote } from "./output.ts";
 import {
   clearStopEvidence,
+  getStopEvidence,
   rememberStopEvidence,
   type StopProof,
   writeStopEvidence,
@@ -388,17 +389,20 @@ export class Tmux {
       if (!control.cancelled)
         this.captureResults.set(dir, {
           ...result,
-          ...(pendingProof ? { pendingProof, proofIncomplete: true } : {}),
+          ...(pendingProof ? { pendingProof } : {}),
+          ...(pendingProof || getStopEvidence(dir)?.confirmed ? { proofIncomplete: true } : {}),
         });
     };
     const prove = async (
       state: StopProof["state"],
       status?: { exitCode?: number; signal?: string },
     ) => {
+      if (control.cancelled) return;
       const proof: StopProof = { version: 1, stream, state, ...status };
       pendingProof = proof;
       try {
         const evidence = rememberStopEvidence(dir, proof, true);
+        pendingProof = undefined; // Process-wide evidence owns retry after registration.
         await boundedIo(() => writeStopEvidence(dir, evidence), 1000);
         clearStopEvidence(dir, evidence);
         pendingProof = undefined;
@@ -440,6 +444,7 @@ export class Tmux {
             // Only the verified private server and its recorded pane are ever targeted.
             if (control.cancelled) return;
             await this.sourceOperation(pane, stream, pid, "running", "kill");
+            if (control.cancelled) return;
             stopped = true;
             await prove("capture_failed");
             finish();
@@ -461,6 +466,7 @@ export class Tmux {
         await finalize({ ...status, capture: "draining" });
         if (control.cancelled) return;
         await this.sourceOperation(pane, stream, pid, "exited", "kill");
+        if (control.cancelled) return;
         stopped = true;
         await prove("exited", { exitCode: status.exitCode, signal: status.signal });
         finish();
@@ -472,6 +478,7 @@ export class Tmux {
         }
         await finalize({ ...status, capture: health === "complete" ? "complete" : "incomplete" });
       } catch (error) {
+        if (control.cancelled) return;
         if (error instanceof IoCapacityError) {
           await finalize({ state: "capture_unverified", capture: "unknown", error: error.message });
           return;
@@ -480,6 +487,7 @@ export class Tmux {
         if (!killed && !control.cancelled) {
           try {
             await this.sourceOperation(pane, stream, pid, knownExit ? "exited" : "either", "kill");
+            if (control.cancelled) return;
             killed = true;
           } catch {
             /* A changed/unavailable source is never targeted without proof. */

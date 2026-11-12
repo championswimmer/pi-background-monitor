@@ -118,11 +118,24 @@ export class Manager {
     return j;
   }
   private async status(j: Job): Promise<Status> {
-    if (j.final) return j.final;
+    if (j.final) {
+      if (j.final.proofIncomplete && !j.pendingProof && !getStopEvidence(j.dir)?.confirmed) {
+        const { proofIncomplete: _previous, ...current } = j.final;
+        return current;
+      }
+      return j.final;
+    }
     if (j.cancelled) return { state: "cancelled" };
     if (j.failure) return { state: "capture_failed", capture: "unknown" };
-    const result = this.tm?.captureResult(j.dir) as Status | undefined;
-    if (result) return result;
+    const result = this.tm?.captureResult(j.dir) as
+      | (Status & { pendingProof?: StopProof })
+      | undefined;
+    if (result) {
+      const { proofIncomplete: _previous, ...current } = result;
+      return result.pendingProof || getStopEvidence(j.dir)?.confirmed
+        ? { ...current, proofIncomplete: true }
+        : current;
+    }
     if (!j.pane || !j.pid || j.generation !== this.generation)
       return { state: "lost", capture: "unknown" };
     try {
@@ -527,6 +540,7 @@ export class Manager {
     job.pendingProof = proof;
     try {
       const evidence = rememberStopEvidence(job.dir, proof, true);
+      job.pendingProof = undefined; // The process-wide evidence owns retry from here.
       await boundedIo(() => writeStopEvidence(job.dir, evidence), 1000);
       clearStopEvidence(job.dir, evidence);
       if (job.pendingProof === proof) job.pendingProof = undefined;

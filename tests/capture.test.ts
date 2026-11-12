@@ -395,3 +395,47 @@ test("publication proof is sampled after a delayed metadata rename", async () =>
     await rm(d.dir, { recursive: true, force: true });
   }
 });
+
+test("a cancelled supervisor cannot publish stale evidence after a newer stop", async () => {
+  const { rememberStopEvidence, writeStopEvidence, readStopProof } = await import(
+    "../src/proof.ts"
+  );
+  const d = await createDirectory(),
+    tm = new Tmux(d.socket, d.dir, d.token);
+  const dir = join(d.dir, "capture"),
+    script = join(d.dir, "command.sh");
+  await mkdir(dir);
+  await writeFile(script, "exec sleep 20\n");
+  let release!: () => void, entered!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const waiting = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const original = tm.sourceOperation.bind(tm);
+  try {
+    const start = await tm.startCaptured(script, d.dir, true, dir, resolve("src/capture.mjs"));
+    const { stream } = JSON.parse(await readFile(join(dir, "capture.json"), "utf8"));
+    tm.sourceOperation = async (...args) => {
+      await original(...args);
+      if (args[3] === "running" && args[4] === "kill") {
+        entered();
+        await gate;
+      }
+    };
+    await checked(tm.args("pipe-pane", "-t", start.pane));
+    await waiting;
+    tm.stopCaptureSupervisors();
+    const entry = rememberStopEvidence(dir, { version: 1, stream, state: "cancelled" }, true);
+    await writeStopEvidence(dir, entry);
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    assert.equal((await readStopProof(dir, stream)).state, "cancelled");
+  } finally {
+    release();
+    tm.stopCaptureSupervisors();
+    await checked(tm.args("kill-server")).catch(() => {});
+    await rm(d.dir, { recursive: true, force: true });
+  }
+});
