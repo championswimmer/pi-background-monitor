@@ -1,43 +1,41 @@
 # pi-background-monitor
 
 [![npm version](https://img.shields.io/npm/v/pi-background-monitor)](https://www.npmjs.com/package/pi-background-monitor)
-[![npm downloads](https://img.shields.io/npm/dm/pi-background-monitor)](https://www.npmjs.com/package/pi-background-monitor)
 
-A [Pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) extension for long-lived shell commands and selective snapshot watches, without continuously filling the conversation with logs.
+A [Pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) extension for long-running Bash jobs, bounded durable logs and selective live-session notifications.
 
 ## Install
 
-Requires Pi 1.5.0 or later, Node.js 22+, Bash, and tmux 3.2+ on Linux or macOS. Install tmux with your package manager, then run:
+Requires Pi 1.5.0+, Node.js 22+, Bash and tmux 3.2+ on Linux or macOS. Install tmux with your package manager, then:
 
 ```sh
 pi install npm:pi-background-monitor
 ```
 
-Reload Pi after installation. Fully restart Pi when upgrading an already loaded older version to enable regex watches. Alternatively, install from Git with `pi install git:github.com/championswimmer/pi-background-monitor`, or from a local checkout with `pi install ./pi-background-monitor` from its parent directory.
+Reload Pi after installation. A full Pi restart is recommended when upgrading from an older loaded extension. Local and Git installs are also supported by `pi install`.
 
 ## Use
 
-Ask Pi to start, inspect, stop, or watch a background task. `/bgmon` or `/bgmon list` opens the monitors tab; `/bgmon settings` opens session limits. Press Tab to switch between tabs. In the monitors list, select a monitor and press Enter for a read-only output view; Esc returns to the list. The view refreshes every two seconds after each inspection, with arrow keys to scroll and End to follow the latest output. `/bgmon stop-server` stops all jobs in your session's server. `bgmon_control` can instead stop **all jobs in a monitor's owning server**.
+Ask Pi to start, inspect, stop or watch a background command. `/bgmon` opens the monitor dashboard; select a job and press Enter for its read-only log, or use `/bgmon settings` to adjust session limits. `/bgmon stop-server` stops your session's private server. Save the `attach` command and `logRef` returned by `bgmon_start` if you may need manual tmux access or explicit historical inspection later.
 
-Every job has a monitor identity. Extension instances in the same JavaScript process share an in-memory index: any can list, inspect, or stop an indexed monitor, and multiple sessions can independently watch it. Each session manages only its own watches. To receive notifications in a child session, that session must load the extension locally; an inherited tool bridge executes in its host session and its watches notify the host instead. Separate processes and worker threads do not share this index. On last session shutdown the index is dropped and jobs detach; only the original Pi session can recover its jobs from its saved locator. New or forked sessions cannot recover them from disk.
-
-Jobs run in an owned private tmux server, not your default server, and continue after Pi exits. Stop them explicitly; detached child processes may survive. Save the returned attach command for manual recovery. Commands run with your privileges, not in a sandbox; permissions for Pi's built-in Bash tool may not cover `bgmon_start`. Inspected output is untrusted and may contain secrets. The output view uses the same bounded snapshot as `bgmon_inspect`, sampled independently; it does not send output to the model. The display wraps text, expands tabs and omits trailing blank rows. It can miss transient or overwritten text and is not an interactive terminal.
-
-Watches are best-effort snapshots: transient or overwritten output may be missed. They expire, do not survive reload and cannot observe while Pi is closed. By default notifications are UI-only and not shown in noninteractive sessions; `nextTurn` delivers on the next turn, while `wake` may start a model turn. Automatic notifications include metadata, not output. A watch's interval and TTL can be updated.
+Each job uses an owned private tmux server, not your default server. Jobs normally survive Pi shutdown, but the last live session detaches its controllers: reopening Pi does **not** automatically re-adopt jobs, resume watches, match offline output or restart Pi. A session-owned `logRef` can still be supplied to `bgmon_inspect` for read-only historical logs; it does not restore a controller. Separate Pi processes do not share live monitor identities. Subagent sessions loaded in the same Pi process can share indexed jobs while keeping separate watches and notifications; an inherited tool bridge acts in its host session.
 
 ### Tools
 
-Agents have four focused tools:
+- `bgmon_start`: run a Bash `command`; optional `id` is 1–64 ASCII letters, digits, `_` or `-` (24 lowercase hex characters are reserved). Returns the monitor ID, log reference and attach command.
+- `bgmon_inspect`: list live monitors, inspect one by `id`, or read an explicit session-owned `logRef`. An `after` cursor pages forward through retained logs; `{sequence: 0, offset: 0}` starts at retained history.
+- `bgmon_control`: `stop` a job, `forget` a stopped indexed job and its logs, `server_stop` its owning server while retaining logs, or `delete_history` an explicitly referenced, verified stopped historical log. A server stop by ID affects that monitor's entire owning server.
+- `bgmon_watch`: add/list/update/remove watches. Add requires `monitorId` and `kind`: `any`, literal `contains`, JavaScript `regex`, or `exit`. `contains` and `regex` need a 1–256 character pattern; regex accepts only unique `i` and `u` flags. `from: "now"` (default) starts at the published tail; `"retained"` scans currently retained output for this new live watch. Filters match completed normalized lines; a final unterminated line is eligible only on clean EOF. `once` defaults to true; false counts repeated matching lines. Optional `ttlSeconds` is 1–604800 and can be renewed. Filter/start changes require a new watch.
+- `bgmon_events`: list or clear this binding's bounded, in-memory event history, including UI-only events in headless sessions. Clearing history does not cancel pending delivery.
 
-- `bgmon_start`: `command` (required Bash script) starts a job. Optional `id` selects a unique monitor ID (1–64 ASCII letters, digits, `_` or `-`); otherwise one is generated. IDs within a server must also differ ignoring case; 24-character lowercase hex IDs are reserved for generated IDs.
-- `bgmon_inspect`: optional monitor `id`; omit it to list monitors, or provide it for a bounded, untrusted output snapshot.
-- `bgmon_control`: `action` is `stop`, `forget`, or `server_stop`. `id` is required except for `server_stop`, which stops the selected monitor's entire server or, without an ID, your session's server. `stop` interrupts a job; `forget` removes a stopped job.
-- `bgmon_watch`: `action` is `add`, `list`, `update`, or `remove`. `add` requires `monitorId` and `kind` (`contains`, `regex`, `changed`, or `exit`); `contains` and `regex` require a `pattern` (1–256 characters). `contains` matches literal text; `regex` uses JavaScript regex source without `/` delimiters and optional `flags` (`i`, `m`, `s`, `u`, each at most once). For example, use `pattern: "error TS\\d+"` and `flags: "i"` in a JSON tool call. Regex matching runs in a time-limited worker; a failed watch is removed with a notification. It returns a watch ID. `list` lists this session's watches; `update` and `remove` require `watchId`. Updates cannot change `monitorId`, `kind`, `pattern`, or `flags`.
+Delivery defaults to `ui`, which never enters model context. `nextTurn` waits for an eligible user- or custom-started run; `wake` may start a run when Pi is idle. Automatic alerts include metadata and labels, not command text, patterns or output. Delivery is best effort: submitted batches are unconfirmed until observed; a missing observation can block that mode, and batching limits can defer queued `nextTurn` details to a later run indefinitely.
 
-Watch add/update options: `label` (≤120 characters), `delivery` (`ui` default, `nextTurn`, or `wake`), `intervalSeconds` (1–300, default 5), `ttlSeconds` (1–1800, default 300; updates renew from now), and `once` (default true). Repeated watches need a state transition and a 10-second cooldown; exit watches always remove themselves.
+## Safety and limits
 
-The settings limit running jobs and total retained jobs owned by the session independently (defaults: 8 running and 16 retained; each can be set from 1 to 64 by typing a number and pressing Enter). Lowering a limit does not stop or remove existing jobs. Retained jobs include finished, cancelled, and lost jobs; forget them to free space. Settings persist with the original session. The dashboard shows this session’s watch intervals and expiry times; watches are not job timeouts. Command previews are retained in the private registry and may contain secrets; old monitors may not have previews.
+Commands run with your privileges, not in a sandbox. Permissions for Pi's built-in Bash tool may not cover this separate execution surface. Stop sends Ctrl-C and can kill the verified pane, but detached descendants may survive. Capture failure can interrupt the owned job. Manual attach is the supported way to interact with detached work; no automatic orphan adoption or cleanup is performed.
 
-Hard limits: 64 retained jobs per owner, 64 indexed monitors and 128 owners per process, 8 watches per session and 64 watches total. Inspection output is bounded.
+Logs are private but can contain secrets and persist longer than Pi's conversation. Output is untrusted and may contain prompt injection. Each source retains at most eight 1 MiB journal segments; rotation, capture failures, slow readers, overlong lines and unavailable TTL boundaries can create visible gaps or errors. No lossless or exactly-once guarantee is made. A busy source may fail a TTL boundary rather than reconstruct an exact earlier point. Inspection is bounded to 16 KiB/200 lines and may require paging.
 
-Recovery may fail after reboot, `/tmp` cleanup or socket loss; locks are never silently broken, and orphan cleanup is not automatic. `/tree` does not rewind processes. This is an early MVP, tested locally on Linux; macOS is covered by CI but has not been tested locally.
+Defaults are eight running and 16 retained jobs per session, configurable from 1 to 64. The process indexes at most 64 monitors, permits eight watches per binding and 64 total, and has 128 storage slots. A full store requires explicit deletion. Proof or reservation failures can strand a slot; in particular, shutdown after a supervisor has issued pane removal but before recording stop evidence can require careful manual cleanup. Never delete uncertain live producer data. Unsettled filesystem operations are bounded but cannot always be cancelled, so saturation can delay work.
+
+Legacy snapshot locators are not adopted. `/tree` does not rewind live processes. The current changes were checked locally on Linux with Node 26 and tmux 3.6; macOS, Node 22 and tmux 3.2 have not been validated locally.
