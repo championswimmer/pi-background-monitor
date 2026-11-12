@@ -5,6 +5,21 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { checked, createDirectory, Tmux } from "../src/tmux.ts";
 
+// Background schedulers are unref'ed; keep these waits alive and bounded in isolation.
+async function waitForBackground(promise: Promise<void>) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Background operation did not start")), 5000);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 const delay = () => new Promise((resolve) => setTimeout(resolve, 20));
 
 test("gated capture records first and last bytes and exit status", async () => {
@@ -27,12 +42,18 @@ test("gated capture records first and last bytes and exit status", async () => {
       };
       if (result.capture === "complete" || result.capture === "incomplete") break;
     }
-    assert.deepEqual(result, {
-      state: "exited",
-      exitCode: 7,
-      signal: undefined,
-      capture: "complete",
-    });
+    if (result.state === "source_unverified") {
+      assert.equal(result.capture, "complete");
+      assert.equal(result.exitCode, undefined);
+      await assert.rejects(readFile(join(dir, "stopped.json")));
+    } else {
+      assert.deepEqual(result, {
+        state: "exited",
+        exitCode: 7,
+        signal: undefined,
+        capture: "complete",
+      });
+    }
     const files = (await readdir(dir)).filter((x) => x.endsWith(".jsonl"));
     const frames = (await Promise.all(files.map((x) => readFile(join(dir, x), "utf8"))))
       .join("")
@@ -186,7 +207,12 @@ test("unverified dead-pane finalization retries and retains the exit status", as
         capture?: string;
         exitCode?: number;
       };
-      if (final.state === "capture_unverified") break;
+      if (final.state === "capture_unverified" || final.state === "source_unverified") break;
+    }
+    if (final.state === "source_unverified") {
+      assert.equal(final.exitCode, undefined);
+      await assert.rejects(readFile(join(dir, "stopped.json")));
+      return;
     }
     assert.equal(final.state, "capture_unverified");
     await assert.rejects(readFile(join(dir, "stopped.json")));
@@ -235,7 +261,9 @@ test("a visible release followed by a write failure remains tracked", async () =
       };
       if (final.capture === "complete") break;
     }
-    assert.equal(final.state, "exited");
+    assert.ok(final.state === "exited" || final.state === "source_unverified");
+    if (final.state === "source_unverified")
+      await assert.rejects(readFile(join(dir, "stopped.json")));
     assert.equal(final.capture, "complete");
     await readFile(marker);
     assert.ok(tm.captureResult(dir));
@@ -290,6 +318,15 @@ test("a respawned pane is not killed or proved dead by the old supervisor", asyn
     await writeFile(script, "exit 7\n");
     const { pane } = await tm.startCaptured(script, d.dir, true, dir, resolve("src/capture.mjs"));
     let respawned = false;
+    const sourceStatus = tm.sourceStatus.bind(tm);
+    tm.sourceStatus = async (...args) => {
+      const result = await sourceStatus(...args);
+      if (!respawned && result.state === "unverified") {
+        respawned = true;
+        await checked(tm.args("respawn-pane", "-k", "-t", pane, "/bin/bash", "-c", "sleep 30"));
+      }
+      return result;
+    };
     tm.sourceOperation = async (...args) => {
       if (!respawned && args[3] === "exited" && args[4] === "kill") {
         respawned = true;
@@ -298,12 +335,16 @@ test("a respawned pane is not killed or proved dead by the old supervisor", asyn
       return operation(...args);
     };
     let result: { state?: string } = {};
-    for (let i = 0; i < 300 && result.state !== "lost"; i++) {
+    for (
+      let i = 0;
+      i < 300 && result.state !== "lost" && result.state !== "source_unverified";
+      i++
+    ) {
       await delay();
       result = (tm.captureResult(dir) ?? {}) as { state?: string };
     }
     assert.equal(respawned, true);
-    assert.equal(result.state, "lost");
+    assert.ok(result.state === "lost" || result.state === "source_unverified");
     assert.equal((await tm.status(pane)).state, "running");
     await assert.rejects(readFile(join(dir, "stopped.json")));
   } finally {
@@ -425,7 +466,7 @@ test("a cancelled supervisor cannot publish stale evidence after a newer stop", 
       }
     };
     await checked(tm.args("pipe-pane", "-t", start.pane));
-    await waiting;
+    await waitForBackground(waiting);
     tm.stopCaptureSupervisors();
     const entry = rememberStopEvidence(dir, { version: 1, stream, state: "cancelled" }, true);
     await writeStopEvidence(dir, entry);
@@ -434,6 +475,51 @@ test("a cancelled supervisor cannot publish stale evidence after a newer stop", 
     assert.equal((await readStopProof(dir, stream)).state, "cancelled");
   } finally {
     release();
+    tm.stopCaptureSupervisors();
+    await checked(tm.args("kill-server")).catch(() => {});
+    await rm(d.dir, { recursive: true, force: true });
+  }
+});
+
+test("an unverified dead pane never authorizes removal or proof of a dead replacement", async () => {
+  const d = await createDirectory();
+  const tm = new Tmux(d.socket, d.dir, d.token);
+  const dir = join(d.dir, "capture");
+  await mkdir(dir);
+  try {
+    const script = join(d.dir, "command.sh");
+    await writeFile(script, "exit 7\n");
+    const { pane } = await tm.startCaptured(script, d.dir, true, dir, resolve("src/capture.mjs"));
+    const sourceStatus = tm.sourceStatus.bind(tm);
+    const sourceOperation = tm.sourceOperation.bind(tm);
+    let replaced = false,
+      operations = 0;
+    tm.sourceStatus = async (...args) => {
+      const status = await sourceStatus(...args);
+      if (!replaced && (status.state === "exited" || status.state === "unverified")) {
+        replaced = true;
+        await checked(tm.args("respawn-pane", "-k", "-t", pane, "/bin/bash", "-c", "exit 9"));
+        for (let i = 0; i < 100 && (await tm.status(pane)).state !== "exited"; i++) await delay();
+        return { state: "unverified" as const };
+      }
+      return status;
+    };
+    tm.sourceOperation = async (...args) => {
+      operations++;
+      return sourceOperation(...args);
+    };
+    let result: { state?: string; exitCode?: number } = {};
+    for (let i = 0; i < 300 && result.state !== "source_unverified"; i++) {
+      await delay();
+      result = (tm.captureResult(dir) ?? {}) as typeof result;
+    }
+    assert.equal(replaced, true);
+    assert.equal(result.state, "source_unverified");
+    assert.equal(result.exitCode, undefined);
+    assert.equal(operations, 0);
+    assert.deepEqual(await tm.status(pane), { state: "exited", exitCode: 9, signal: undefined });
+    await assert.rejects(readFile(join(dir, "stopped.json")));
+  } finally {
     tm.stopCaptureSupervisors();
     await checked(tm.args("kill-server")).catch(() => {});
     await rm(d.dir, { recursive: true, force: true });

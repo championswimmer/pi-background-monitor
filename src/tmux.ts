@@ -378,6 +378,7 @@ export class Tmux {
   private superviseCapture(pane: string, dir: string, nonce: string, stream: string, pid: number) {
     let busy = false;
     let finished = false;
+    let unverifiedSince = 0;
     let knownExit: { state: "exited"; exitCode?: number; signal?: string } | undefined;
     let pendingProof: StopProof | undefined;
     const control = { timer: undefined as unknown as NodeJS.Timeout, cancelled: false };
@@ -431,6 +432,22 @@ export class Tmux {
         if (status.state === "exited") knownExit = status;
         const state = await readState();
         if (state.nonce !== nonce) throw new Error("Capture identity mismatch");
+        if (status.state === "unverified") {
+          // tmux may hide pane_pid after exit. EOF proves capture completion,
+          // not the identity or exit status of the process now in the pane.
+          unverifiedSince ||= Date.now();
+          const complete = state.health === "complete";
+          const done =
+            complete || state.health === "failed" || Date.now() - unverifiedSince >= 5000;
+          await finalize({
+            state: "source_unverified",
+            capture: complete ? "complete" : done ? "incomplete" : "draining",
+            error: "Dead pane producer identity unavailable",
+          });
+          if (done) finish();
+          return;
+        }
+        unverifiedSince = 0;
         if (status.state === "running") {
           const pipe = await checked(
             this.args("display-message", "-p", "-t", pane, "#{pane_pipe}"),
@@ -557,7 +574,9 @@ export class Tmux {
       throw new Error("Unable to inspect producer pane");
     }
     const [dead, actualPid, actualStream, status, signal] = r.stdout.trim().split("|");
-    if (actualPid !== String(pid) || actualStream !== stream) return { state: "changed" as const };
+    if (actualStream !== stream) return { state: "changed" as const };
+    if (dead === "1" && actualPid === "") return { state: "unverified" as const };
+    if (actualPid !== String(pid)) return { state: "changed" as const };
     if (dead === "1")
       return {
         state: "exited" as const,

@@ -781,7 +781,8 @@ class Broker {
           operation?.settledAt !== undefined && operation.settledAt <= w.deadline
             ? operation.value?.status.state
             : undefined;
-        if (observed && !["running", "capture_unverified"].includes(observed))
+        if (observed === "source_unverified") this.finish(w, "failed", "source_unverified");
+        else if (observed && !["running", "capture_unverified"].includes(observed))
           this.finish(w, "fired", observed);
         else {
           w.expired = true;
@@ -846,6 +847,10 @@ class Broker {
       );
       w.frames = page.frames.filter((f) => f.sequence <= limit);
       if (w.kind === "exit") {
+        if (w.sourceState === "source_unverified") {
+          this.finish(w, "failed", "source_unverified");
+          return;
+        }
         if (!["running", "capture_unverified"].includes(w.sourceState)) {
           this.finish(w, "fired", w.sourceState);
           return;

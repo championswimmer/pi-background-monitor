@@ -7,6 +7,21 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import extension from "../src/index.ts";
 import { checked, Tmux } from "../src/tmux.ts";
 
+// Background schedulers are unref'ed; keep these waits alive and bounded in isolation.
+async function waitForBackground(promise: Promise<void>) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Background operation did not start")), 5000);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 const sockets = new Set<string>();
 const previousStateHome = process.env.XDG_STATE_HOME;
 let testStateHome = "";
@@ -553,6 +568,16 @@ test("shared monitor capacity frees a slot when a retained job is forgotten", as
       seen = await extra.call("bgmon_inspect", { id: ids[0] });
     }
     assert.equal(seen.captureHealth, "complete");
+    if (seen.state === "source_unverified") {
+      assert.match(
+        (await extra.call("bgmon_control", { action: "forget", id: ids[0] })).error,
+        /unverified/,
+      );
+      assert.equal(
+        (await owners[0].call("bgmon_control", { action: "server_stop" })).stopped,
+        true,
+      );
+    }
     assert.equal(
       (await extra.call("bgmon_control", { action: "forget", id: ids[0] })).forgotten,
       ids[0],
@@ -1199,6 +1224,9 @@ test("completed historical logs can be deleted without reviving a monitor", asyn
       (await owner.call("bgmon_control", { action: "delete_history", logRef: job.logRef })).error,
       /Use forget/,
     );
+    if (seen.state === "source_unverified") {
+      assert.equal((await owner.call("bgmon_control", { action: "server_stop" })).stopped, true);
+    }
     await owner.close();
     const other = runtime("other-session");
     await other.start();
@@ -1291,11 +1319,17 @@ test("explicit historical deletion reclaims a verified dead detached pane", asyn
       release();
       await Promise.all(reservations);
       await new Promise((resolve) => setImmediate(resolve));
-      assert.equal(
-        (await resumed.call("bgmon_control", { action: "delete_history", logRef: job.logRef }))
-          .deleted,
-        true,
-      );
+      const deletion = await resumed.call("bgmon_control", {
+        action: "delete_history",
+        logRef: job.logRef,
+      });
+      if (reservations.length === 0) {
+        assert.match(deletion.error, /Producer stop is unverified/);
+        assert.equal(
+          (await resumed.call("bgmon_inspect", { logRef: job.logRef })).state,
+          "unknown",
+        );
+      } else assert.equal(deletion.deleted, true);
     } finally {
       release();
       Tmux.prototype.sourceOperation = original;
@@ -1685,7 +1719,7 @@ test("a stalled watch read does not starve another live session", async () => {
       }
       return original.call(this, id, stream, after);
     };
-    await reading;
+    await waitForBackground(reading);
     const start = Date.now();
     const control = await Promise.race([
       a.call("bgmon_control", { action: "forget", id: slowJob.id }),
@@ -1956,7 +1990,7 @@ test("renewing TTL cannot reuse a stale in-flight expiry boundary", async () => 
       }
       return snapshot;
     };
-    await entered;
+    await waitForBackground(entered);
     assert.equal(
       (await a.call("bgmon_watch", { action: "update", watchId: watch.id, ttlSeconds: 1 })).state,
       "active",
@@ -2013,7 +2047,7 @@ test("an exit observed after the expiry deadline does not trigger an exit watch"
       }
       return page;
     };
-    await reading;
+    await waitForBackground(reading);
     await new Promise((resolve) => setTimeout(resolve, 1500));
     release();
     let state: any = {};
@@ -2115,6 +2149,11 @@ test("new watches remain usable after normal journal rotation", async () => {
       seen = await a.call("bgmon_inspect", { id: job.id });
     }
     assert.equal(seen.captureHealth, "complete");
+    for (let i = 0; i < 250 && seen.capture !== "complete"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      seen = await a.call("bgmon_inspect", { id: job.id });
+    }
+    assert.equal(seen.capture, "complete");
     const dir = join(
       process.env.XDG_STATE_HOME!,
       "pi-background-monitor",
@@ -2183,7 +2222,9 @@ test("new watches remain usable after normal journal rotation", async () => {
     assert.equal(list.find((w) => w.id === retained.id).state, "fired");
     assert.equal(list.find((w) => w.id === retained.id).prefixMissing, true);
     assert.equal(list.find((w) => w.id === now.id).state, "completed_no_match");
-    assert.equal(list.find((w) => w.id === exit.id).state, "fired");
+    const exitResult = list.find((w) => w.id === exit.id);
+    assert.equal(exitResult.state, seen.state === "source_unverified" ? "failed" : "fired");
+    if (seen.state === "source_unverified") assert.equal(exitResult.error, "source_unverified");
   } finally {
     await a.call("bgmon_control", { action: "server_stop" });
     await a.close();
@@ -2220,7 +2261,7 @@ test("repeated TTL renewals do not multiply a stalled boundary read", async () =
       }
       return original.call(this, id, stream);
     };
-    await started;
+    await waitForBackground(started);
     for (let i = 0; i < 3; i++) {
       assert.equal(
         (await a.call("bgmon_watch", { action: "update", watchId: watch.id, ttlSeconds: 1 })).state,

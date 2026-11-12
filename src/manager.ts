@@ -43,6 +43,7 @@ type Status = {
   exitCode?: number;
   signal?: string;
   capture?: string;
+  error?: string;
   proofIncomplete?: boolean;
 };
 export type LogCursor = { sequence: number; offset: number };
@@ -141,6 +142,12 @@ export class Manager {
     try {
       if (!(await this.verified())) return { state: "capture_unverified", capture: "unknown" };
       const current = await this.tm!.sourceStatus(j.pane, j.ref.stream, j.pid);
+      if (current.state === "unverified")
+        return {
+          state: "source_unverified",
+          capture: "unknown",
+          error: "Dead pane producer identity unavailable",
+        };
       return current.state === "changed" ? { state: "lost", capture: "unknown" } : current;
     } catch {
       return { state: "capture_unverified", capture: "unknown" };

@@ -33,8 +33,9 @@ test("journal-backed jobs finalize and support explicit read-only history", asyn
       await delay();
       seen = await m.run(() => m.inspect(started.id));
     }
-    assert.equal(seen.state, "exited");
-    assert.equal(seen.exitCode, 7);
+    const unverified = seen.state === "source_unverified";
+    assert.equal(seen.state, unverified ? "source_unverified" : "exited");
+    assert.equal(seen.exitCode, unverified ? undefined : 7);
     assert.match(seen.untrustedOutput.text, /LAST/);
     let cursor = { sequence: 0, offset: 0 },
       full = "";
@@ -46,7 +47,13 @@ test("journal-backed jobs finalize and support explicit read-only history", asyn
     }
     assert.equal(full, `FIRST\n${"row\n".repeat(350)}LAST\n`);
     assert.equal(refs.length, 1);
-    assert.notEqual((await client(["-S", started.socket, "list-sessions"])).code, 0);
+    if (unverified) {
+      await assert.rejects(
+        m.run(() => m.forget(started.id)),
+        /unverified/,
+      );
+      assert.equal((await m.run(() => m.serverStop())).stopped, true);
+    } else assert.notEqual((await client(["-S", started.socket, "list-sessions"])).code, 0);
     const again = await m.run(() => m.start("printf 'NEW\\n'", process.cwd()));
     assert.notEqual(again.id, started.id);
     const historical = new Manager(
@@ -60,8 +67,8 @@ test("journal-backed jobs finalize and support explicit read-only history", asyn
       const read = await historical.run(() =>
         historical.inspectHistorical(refs[0], { sequence: 0, offset: 0 }),
       );
-      assert.equal(read.state, "exited");
-      assert.equal(read.exitCode, 7);
+      assert.equal(read.state, unverified ? "lost" : "exited");
+      assert.equal(read.exitCode, unverified ? undefined : 7);
       assert.match(read.untrustedOutput.text, /FIRST/);
       const wrong = new Manager(
         "session-b",
@@ -100,13 +107,24 @@ test("stop and validation retain owned-process safety", async () => {
       /Invalid job/,
     );
     const job = await m.run(() => m.start("echo READY; exec sleep 30", process.cwd()));
-    assert.equal((await m.run(() => m.stop(job.id))).state, "cancelled");
+    const stopped = await m.run(() => m.stop(job.id));
+    if (stopped.state === "capture_unverified") {
+      assert.equal((await m.run(() => m.inspect(job.id))).state, "source_unverified");
+      await assert.rejects(
+        m.run(() => m.forget(job.id)),
+        /unverified/,
+      );
+      assert.equal((await m.run(() => m.serverStop())).stopped, true);
+    } else assert.equal(stopped.state, "cancelled");
     let seen = await m.run(() => m.inspect(job.id));
     for (let i = 0; i < 200 && seen.captureHealth !== "complete"; i++) {
       await delay();
       seen = await m.run(() => m.inspect(job.id));
     }
-    assert.equal(seen.state, "cancelled");
+    assert.equal(
+      seen.state,
+      stopped.state === "capture_unverified" ? "source_unverified" : "cancelled",
+    );
     assert.equal(seen.captureHealth, "complete");
     const history = new Manager(
       "session",
@@ -114,7 +132,10 @@ test("stop and validation retain owned-process safety", async () => {
       () => {},
       join(root, "state"),
     );
-    assert.equal((await history.inspectHistorical(job.logRef)).state, "cancelled");
+    assert.equal(
+      (await history.inspectHistorical(job.logRef)).state,
+      stopped.state === "capture_unverified" ? "lost" : "cancelled",
+    );
     await history.close();
     assert.equal((await m.run(() => m.forget(job.id))).forgotten, job.id);
   } finally {
@@ -247,7 +268,14 @@ test("unverified capture remains retryable with an explicit stop", async () => {
       /verify producer/,
     );
     tm.verify = verify;
-    assert.equal((await m.run(() => m.stop(job.id))).state, "cancelled");
+    const result = await m.run(() => m.stop(job.id));
+    if (result.state === "capture_unverified") {
+      assert.equal((await m.run(() => m.inspect(job.id))).state, "source_unverified");
+      await assert.rejects(
+        m.run(() => m.forget(job.id)),
+        /unverified/,
+      );
+    } else assert.equal(result.state, "cancelled");
   } finally {
     if (tm && verify) tm.verify = verify;
     await m.run(() => m.serverStop()).catch(() => {});
@@ -424,9 +452,18 @@ test("supervisor retains exit evidence when proof publication is saturated", asy
   try {
     const job = await m.run(() => m.start("sleep 0.4; exit 0", process.cwd()));
     let info: any = {};
-    for (let i = 0; i < 150 && !info.proofIncomplete; i++) {
+    for (let i = 0; i < 150 && !info.proofIncomplete && info.state !== "source_unverified"; i++) {
       await delay();
       info = await m.run(() => m.inspect(job.id));
+    }
+    if (info.state === "source_unverified") {
+      assert.equal(saturated, false);
+      assert.equal(info.exitCode, undefined);
+      await assert.rejects(
+        m.run(() => m.forget(job.id)),
+        /unverified/,
+      );
+      return;
     }
     assert.equal(info.proofIncomplete, true);
     release();
