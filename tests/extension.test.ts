@@ -53,15 +53,15 @@ test("system prompt provides bounded background monitor guidance only when avail
   assert.match(guidance, /dev servers.*log streams.*builds.*test suites/);
   assert.match(guidance, /survive Pi shutdown/);
   assert.match(guidance, /untrusted/);
-  assert.match(guidance, /miss transient output/);
+  assert.match(guidance, /retention or capture failures can create gaps/);
   // Pi wraps custom sections in opening and closing tags.
   assert.ok(guidance.split("\n").length + 2 <= 5);
   handler({ systemPromptOptions: options });
   assert.equal(options.sections.background_monitor, guidance);
   options.selectedTools = ["bgmon_watch"];
   handler({ systemPromptOptions: options });
-  assert.match(options.sections.background_monitor, /contains.*literal.*regex.*JavaScript/);
-  assert.match(options.sections.background_monitor, /imsu/);
+  assert.match(options.sections.background_monitor, /any, literal contains, regex/);
+  assert.match(options.sections.background_monitor, /i\/u flags/);
   options.selectedTools = ["bgmon_start", "bgmon_watch"];
   handler({ systemPromptOptions: options });
   assert.equal(options.sections.background_monitor.split("\n").length, 5);
@@ -104,7 +104,6 @@ test("watch wakes only on selected event, not routine output; shutdown detaches"
       kind: "contains",
       pattern: "SECRET_READY",
       delivery: "wake",
-      intervalSeconds: 1,
     });
     assert.ok(watch.id);
     const deadline = Date.now() + 6000;
@@ -151,7 +150,6 @@ test("exit watch reports a lost pane while another job remains alive", async () 
       monitorId: first.id,
       kind: "exit",
       delivery: "wake",
-      intervalSeconds: 1,
     });
     assert.ok(watch.id);
     const panes = await checked(["-S", first.socket, "list-panes", "-a", "-F", "#{pane_id}"]);
@@ -233,7 +231,6 @@ test("shared identities and subscriptions end with the live process binding", as
       kind: "contains",
       pattern: "SHARED_SECRET",
       delivery: "wake",
-      intervalSeconds: 1,
     });
     const watch2 = await c.call("bgmon_watch", {
       action: "add",
@@ -241,7 +238,6 @@ test("shared identities and subscriptions end with the live process binding", as
       kind: "contains",
       pattern: "SHARED_SECRET",
       delivery: "nextTurn",
-      intervalSeconds: 1,
     });
     assert.ok(watch1.id && watch2.id);
     assert.match(
@@ -254,10 +250,9 @@ test("shared identities and subscriptions end with the live process binding", as
           action: "update",
           watchId: watch1.id,
           ttlSeconds: 30,
-          intervalSeconds: 2,
         })
-      ).intervalSeconds,
-      2,
+      ).state,
+      "active",
     );
     await a.close();
     const deadline = Date.now() + 7000;
@@ -322,7 +317,7 @@ test("watch limits and stale shutdown delivery", async () => {
     const invalid = await a.call("bgmon_watch", {
       action: "update",
       watchId: (await a.call("bgmon_watch", { action: "list" }))[0].id,
-      ttlSeconds: 5000,
+      ttlSeconds: 604801,
     });
     assert.match(invalid.error, /TTL/);
     await a.close();
@@ -348,7 +343,7 @@ test("Pi loader independently reloads extension factories using the same process
     resolve("node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/loader.js"),
   ).href;
   const { loadExtensions } = await import(loaderPath);
-  const key = Symbol.for("pi-background-monitor:broker:v1");
+  const key = Symbol.for("pi-background-monitor:broker:v2");
   const before = (globalThis as any)[key];
   assert.ok(before);
   const a = await loadExtensions([resolve("src/index.ts")], process.cwd());
@@ -404,7 +399,7 @@ test("Pi loader independently reloads extension factories using the same process
       monitorId: job.id,
       kind: "contains",
       pattern: "LOADER_READY",
-      intervalSeconds: 1,
+
       delivery: "wake",
     });
     assert.ok(watch.id, JSON.stringify(watch));
@@ -464,9 +459,8 @@ test("obsolete locator is ignored and cannot block shared identities", async () 
     assert.ok(Array.isArray(await b.call("bgmon_inspect", {})));
     assert.equal((await b.call("bgmon_inspect", { id: job.id })).state, "running");
     assert.equal(
-      (await b.call("bgmon_watch", { action: "update", watchId: watch.id, intervalSeconds: 4 }))
-        .intervalSeconds,
-      4,
+      (await b.call("bgmon_watch", { action: "update", watchId: watch.id, ttlSeconds: 4 })).state,
+      "active",
     );
     assert.equal(
       (await b.call("bgmon_watch", { action: "remove", watchId: watch.id })).removed,
@@ -565,7 +559,6 @@ test("shared watch capacity frees slots and stopped jobs retain subscriptions", 
           action: "add",
           monitorId: job.id,
           kind: "exit",
-          intervalSeconds: 300,
         });
         assert.ok(watch.id, JSON.stringify(watch));
         if (i === 0 && j === 0) firstWatch = watch.id;
@@ -627,9 +620,9 @@ test("bgmon interface validates action arguments and command routing", async () 
       "kind",
       "pattern",
       "flags",
+      "from",
       "label",
       "delivery",
-      "intervalSeconds",
       "ttlSeconds",
       "once",
     ]);
@@ -734,7 +727,7 @@ test("dashboard displays sanitized command and watch information and completes s
       action: "add",
       monitorId: job.id,
       kind: "exit",
-      intervalSeconds: 17,
+
       ttlSeconds: 90,
     });
     let output: string[] = [];
@@ -775,7 +768,7 @@ test("dashboard displays sanitized command and watch information and completes s
     await a.command("bgmon", "");
     await a.command("bgmon", "list");
     assert.match(output.join("\n"), /sleep 30 # dashboard example/);
-    assert.match(output.join("\n"), /every 17s.*expires/);
+    assert.match(output.join("\n"), /exit.*active.*hits 0/);
     assert.match(output.join("\n"), new RegExp(job.id));
   } finally {
     await a.call("bgmon_control", { action: "server_stop" });
@@ -1064,7 +1057,7 @@ test("historical references do not follow reused readable IDs", async () => {
   }
 });
 
-test("regex watches validate inputs and notify on matching snapshots", async () => {
+test("regex watches validate inputs and notify on matching journal lines", async () => {
   const a = runtime("regex-watch");
   await a.start();
   try {
@@ -1089,7 +1082,6 @@ test("regex watches validate inputs and notify on matching snapshots", async () 
       pattern: "ERROR TS\\d+",
       flags: "i",
       delivery: "wake",
-      intervalSeconds: 1,
     });
     assert.ok(watch.id, JSON.stringify(watch));
     const deadline = Date.now() + 6000;
@@ -1104,7 +1096,7 @@ test("regex watches validate inputs and notify on matching snapshots", async () 
   }
 });
 
-test("slow regex watch is removed with metadata-only notice and literal watches still work", async () => {
+test("slow regex watch fails with metadata-only notice and literal watches still work", async () => {
   const a = runtime("regex-timeout");
   await a.start();
   try {
@@ -1118,26 +1110,22 @@ test("slow regex watch is removed with metadata-only notice and literal watches 
       kind: "regex",
       pattern: "(a+)+b",
       delivery: "wake",
-      intervalSeconds: 1,
     });
     const literal = await a.call("bgmon_watch", {
       action: "add",
       monitorId: job.id,
       kind: "contains",
       pattern: "(a+)+b",
-      intervalSeconds: 1,
     });
     assert.ok(regex.id && literal.id);
     const deadline = Date.now() + 7000;
     while (!a.messages.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 50));
     assert.equal(a.messages.length, 1);
-    assert.match(a.messages[0][0].content, /regex watch removed \(evaluation failed\)/);
+    assert.match(a.messages[0][0].content, /regex_evaluation_failed/);
     assert.doesNotMatch(a.messages[0][0].content, /\(a\+\)\+b|aaaa/);
     const watches = await a.call("bgmon_watch", { action: "list" });
-    assert.deepEqual(
-      watches.map((w: { id: string }) => w.id),
-      [literal.id],
-    );
+    assert.equal(watches.find((w: { id: string }) => w.id === regex.id).state, "failed");
+    assert.equal(watches.find((w: { id: string }) => w.id === literal.id).state, "active");
   } finally {
     await a.call("bgmon_control", { action: "server_stop" });
     await a.close();
@@ -1240,5 +1228,1123 @@ test("explicit historical deletion reclaims a verified dead detached pane", asyn
     }
   } finally {
     await owner.close();
+  }
+});
+
+test("journal watches catch transient errors beyond the old snapshot window", async () => {
+  const a = runtime("journal-filter");
+  await a.start();
+  try {
+    const job = await a.call("bgmon_start", {
+      command:
+        "sleep 0.8; echo ERROR_ONCE; for ((i=0;i<2000;i++)); do printf 'routine-output-%04d-xxxxxxxxxxxxxxxx\\n' $i; done; sleep 5",
+    });
+    assert.equal(job.state, "running");
+    const watch = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "ERROR_ONCE",
+      delivery: "wake",
+    });
+    assert.ok(watch.id, JSON.stringify(watch));
+    for (let i = 0; i < 300 && !a.messages.length; i++)
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(a.messages.length, 1);
+    assert.doesNotMatch(a.messages[0][0].content, /ERROR_ONCE/);
+    const state = (await a.call("bgmon_watch", { action: "list" })).find(
+      (w: any) => w.id === watch.id,
+    );
+    assert.equal(state.state, "fired");
+    assert.equal(state.hits, 1);
+  } finally {
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("retained regex watches match final unterminated lines and repeated lines count separately", async () => {
+  const a = runtime("journal-retained");
+  await a.start();
+  try {
+    const job = await a.call("bgmon_start", {
+      command: "printf 'repeat\\nrepeat\\nrepeat\\ntail-ERROR'",
+    });
+    let seen: any = {};
+    for (let i = 0; i < 200 && seen.captureHealth !== "complete"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      seen = await a.call("bgmon_inspect", { id: job.id });
+    }
+    assert.equal(seen.captureHealth, "complete");
+    const repeat = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "repeat",
+      from: "retained",
+      once: false,
+    });
+    const tail = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "regex",
+      pattern: "tail-error$",
+      flags: "i",
+      from: "retained",
+    });
+    for (let i = 0; i < 300; i++) {
+      const list = await a.call("bgmon_watch", { action: "list" });
+      if (
+        list.find((w: any) => w.id === repeat.id)?.state !== "active" &&
+        list.find((w: any) => w.id === tail.id)?.state !== "active"
+      )
+        break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const list = await a.call("bgmon_watch", { action: "list" });
+    assert.equal(list.find((w: any) => w.id === repeat.id).hits, 3);
+    assert.equal(list.find((w: any) => w.id === tail.id).state, "fired");
+    assert.equal(list.find((w: any) => w.id === tail.id).hits, 1);
+  } finally {
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("from-now watches skip an existing partial line and report expiry", async () => {
+  const a = runtime("journal-partial");
+  await a.start();
+  try {
+    const job = await a.call("bgmon_start", {
+      command: "printf 'old-prefix'; sleep 1; printf 'OLD_SUFFIX\\nNEW_LINE\\n'; sleep 3",
+    });
+    for (let i = 0; i < 100; i++) {
+      if (
+        (await a.call("bgmon_inspect", { id: job.id })).untrustedOutput?.text.includes("old-prefix")
+      )
+        break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const old = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "OLD_SUFFIX",
+      ttlSeconds: 2,
+    });
+    const fresh = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "NEW_LINE",
+    });
+    for (let i = 0; i < 250; i++) {
+      const list = await a.call("bgmon_watch", { action: "list" });
+      if (
+        list.find((w: any) => w.id === old.id)?.state === "expired" &&
+        list.find((w: any) => w.id === fresh.id)?.state === "fired"
+      )
+        break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const list = await a.call("bgmon_watch", { action: "list" });
+    assert.equal(list.find((w: any) => w.id === old.id).state, "expired");
+    assert.equal(list.find((w: any) => w.id === old.id).hits, 0);
+    assert.equal(list.find((w: any) => w.id === fresh.id).hits, 1);
+  } finally {
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("overlong logical lines fail watches visibly", async () => {
+  const a = runtime("journal-long-line");
+  await a.start();
+  try {
+    const job = await a.call("bgmon_start", {
+      command: "sleep 0.5; printf '%70000s' ''; echo; sleep 3",
+    });
+    const watch = await a.call("bgmon_watch", { action: "add", monitorId: job.id, kind: "any" });
+    for (let i = 0; i < 250; i++) {
+      const state = (await a.call("bgmon_watch", { action: "list" })).find(
+        (w: any) => w.id === watch.id,
+      );
+      if (state?.state === "failed") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const state = (await a.call("bgmon_watch", { action: "list" })).find(
+      (w: any) => w.id === watch.id,
+    );
+    assert.equal(state.state, "failed");
+    assert.equal(state.error, "line_too_long");
+  } finally {
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("failed captures drain all published pages before failing a watch", async () => {
+  const a = runtime("failed-tail-pages");
+  await a.start();
+  try {
+    const job = await a.call("bgmon_start", { command: "echo seed" });
+    let seen: any = {};
+    for (let i = 0; i < 200 && seen.captureHealth !== "complete"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      seen = await a.call("bgmon_inspect", { id: job.id });
+    }
+    assert.equal(seen.captureHealth, "complete");
+    const { readdir, writeFile } = await import("node:fs/promises");
+    const dir = join(
+      process.env.XDG_STATE_HOME!,
+      "pi-background-monitor",
+      "owners",
+      job.logRef.owner,
+      job.logRef.stream,
+    );
+    for (const name of await readdir(dir)) if (name.endsWith(".jsonl")) await rm(join(dir, name));
+    let start = 0;
+    const frames = Array.from({ length: 201 }, (_, index) => {
+      const data = Buffer.from(index === 200 ? "PUBLISHED_MATCH\n" : "noise\n");
+      const frame = {
+        version: 1,
+        stream: job.logRef.stream,
+        sequence: index + 1,
+        start,
+        end: start + data.length,
+        kind: "output",
+        data: data.toString("base64"),
+      };
+      start += data.length;
+      return JSON.stringify(frame);
+    });
+    await writeFile(join(dir, "1.jsonl"), `${frames.join("\n")}\n`, { mode: 0o600 });
+    await writeFile(
+      join(dir, "capture.json"),
+      JSON.stringify({
+        version: 1,
+        stream: job.logRef.stream,
+        first: 1,
+        tail: 201,
+        health: "failed",
+      }),
+      { mode: 0o600 },
+    );
+    const watch = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "PUBLISHED_MATCH",
+      from: "retained",
+    });
+    for (let i = 0; i < 200; i++) {
+      const state = (await a.call("bgmon_watch", { action: "list" })).find(
+        (w: any) => w.id === watch.id,
+      );
+      if (state?.state !== "active") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const state = (await a.call("bgmon_watch", { action: "list" })).find(
+      (w: any) => w.id === watch.id,
+    );
+    assert.equal(state.state, "failed");
+    assert.equal(state.error, "capture_incomplete");
+    assert.equal(state.hits, 1);
+  } finally {
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("expiry drains a committed final unterminated line before expiring", async () => {
+  const a = runtime("expiry-final-line");
+  await a.start();
+  try {
+    const job = await a.call("bgmon_start", {
+      command: "for ((i=0;i<1000;i++)); do echo noise; done; printf FINAL_MATCH",
+    });
+    let seen: any = {};
+    for (let i = 0; i < 200 && seen.captureHealth !== "complete"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      seen = await a.call("bgmon_inspect", { id: job.id });
+    }
+    assert.equal(seen.captureHealth, "complete");
+    const watch = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "FINAL_MATCH",
+      from: "retained",
+      ttlSeconds: 1,
+    });
+    for (let i = 0; i < 250; i++) {
+      const state = (await a.call("bgmon_watch", { action: "list" })).find(
+        (w: any) => w.id === watch.id,
+      );
+      if (state?.state !== "active") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const state = (await a.call("bgmon_watch", { action: "list" })).find(
+      (w: any) => w.id === watch.id,
+    );
+    assert.equal(state.state, "fired");
+    assert.equal(state.hits, 1);
+  } finally {
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("lost sources drain newly committed lines before reporting failure", async () => {
+  const { Manager } = await import("../src/manager.ts");
+  const a = runtime("lost-drain");
+  await a.start();
+  const original = Manager.prototype.watchRead;
+  try {
+    const job = await a.call("bgmon_start", { command: "sleep 0.8; echo BUFFERED_MATCH; sleep 3" });
+    const watch = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "BUFFERED_MATCH",
+    });
+    Manager.prototype.watchRead = async function (id, stream, after) {
+      const page = await original.call(this, id, stream, after);
+      return id === job.id
+        ? { ...page, health: "ready", status: { state: "lost", capture: "unknown" } }
+        : page;
+    };
+    for (let i = 0; i < 200; i++) {
+      const state = (await a.call("bgmon_watch", { action: "list" })).find(
+        (w: any) => w.id === watch.id,
+      );
+      if (state?.state !== "active") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const state = (await a.call("bgmon_watch", { action: "list" })).find(
+      (w: any) => w.id === watch.id,
+    );
+    assert.equal(state.state, "failed");
+    assert.equal(state.error, "capture_incomplete");
+    assert.equal(state.hits, 1);
+  } finally {
+    Manager.prototype.watchRead = original;
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("an expiry boundary preserves known capture failure", async () => {
+  const { Manager } = await import("../src/manager.ts");
+  const a = runtime("expiry-integrity");
+  await a.start();
+  const original = Manager.prototype.watchRead;
+  try {
+    const job = await a.call("bgmon_start", { command: "sleep 5" });
+    const watch = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "NEVER",
+      ttlSeconds: 1,
+    });
+    let first = true;
+    Manager.prototype.watchRead = async function (id, stream, after) {
+      if (id === job.id && first) {
+        first = false;
+        await new Promise((resolve) => setTimeout(resolve, 1100));
+      }
+      const page = await original.call(this, id, stream, after);
+      return id === job.id ? { ...page, health: "failed" } : page;
+    };
+    for (let i = 0; i < 200; i++) {
+      const state = (await a.call("bgmon_watch", { action: "list" })).find(
+        (w: any) => w.id === watch.id,
+      );
+      if (state?.state !== "active") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const state = (await a.call("bgmon_watch", { action: "list" })).find(
+      (w: any) => w.id === watch.id,
+    );
+    assert.equal(state.state, "failed");
+    assert.equal(state.error, "capture_incomplete");
+    assert.equal(state.expired, true);
+  } finally {
+    Manager.prototype.watchRead = original;
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("a stalled watch read does not starve another live session", async () => {
+  const { Manager } = await import("../src/manager.ts");
+  const a = runtime("read-stall-owner"),
+    b = runtime("read-stall-sibling");
+  await a.start();
+  await b.start();
+  const original = Manager.prototype.watchRead;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let entered!: () => void;
+  const reading = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  try {
+    const slowJob = await a.call("bgmon_start", { command: "sleep 10" });
+    const fastJob = await b.call("bgmon_start", { command: "sleep 0.8; echo FAST_READY; sleep 3" });
+    await a.call("bgmon_watch", { action: "add", monitorId: slowJob.id, kind: "any" });
+    const fast = await b.call("bgmon_watch", {
+      action: "add",
+      monitorId: fastJob.id,
+      kind: "contains",
+      pattern: "FAST_READY",
+    });
+    Manager.prototype.watchRead = async function (id, stream, after) {
+      if (id === slowJob.id) {
+        entered();
+        await gate;
+      }
+      return original.call(this, id, stream, after);
+    };
+    await reading;
+    const start = Date.now();
+    const control = await Promise.race([
+      a.call("bgmon_control", { action: "forget", id: slowJob.id }),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 3500)),
+    ]);
+    assert.ok(control, "owner control must not wait for the stalled read");
+    assert.match(control.error, /running/);
+    let state: any = {};
+    while (Date.now() - start < 4000 && state.state !== "fired") {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      state =
+        (await b.call("bgmon_watch", { action: "list" })).find((w: any) => w.id === fast.id) ?? {};
+    }
+    assert.equal(state.state, "fired");
+    assert.ok(Date.now() - start < 4000);
+  } finally {
+    Manager.prototype.watchRead = original;
+    release();
+    await a.call("bgmon_control", { action: "server_stop" });
+    await b.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+    await b.close();
+  }
+});
+
+test("expiry samples a fresh tail rather than reusing a stalled pre-deadline read", async () => {
+  const { Manager } = await import("../src/manager.ts");
+  const a = runtime("expiry-fresh-boundary");
+  await a.start();
+  const original = Manager.prototype.watchRead;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  try {
+    const job = await a.call("bgmon_start", {
+      command: "sleep 0.6; echo BEFORE_DEADLINE; sleep 4",
+    });
+    const watch = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "BEFORE_DEADLINE",
+      ttlSeconds: 1,
+    });
+    let first = true;
+    Manager.prototype.watchRead = async function (id, stream, after) {
+      const page = await original.call(this, id, stream, after);
+      if (id === job.id && first) {
+        first = false;
+        await gate;
+      }
+      return page;
+    };
+    setTimeout(release, 1600).unref();
+    let state: any = {};
+    for (let i = 0; i < 300 && state.state !== "fired"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      state =
+        (await a.call("bgmon_watch", { action: "list" })).find((w: any) => w.id === watch.id) ?? {};
+      if (state.state === "expired" || state.state === "failed") break;
+    }
+    assert.equal(state.state, "fired");
+    assert.equal(state.hits, 1);
+  } finally {
+    Manager.prototype.watchRead = original;
+    release();
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("clean EOF flushes the final line even when producer status is lost", async () => {
+  const { Manager } = await import("../src/manager.ts");
+  const a = runtime("lost-clean-eof");
+  await a.start();
+  const original = Manager.prototype.watchRead;
+  try {
+    const job = await a.call("bgmon_start", { command: "printf LOST_FINAL_MATCH" });
+    let seen: any = {};
+    for (let i = 0; i < 200 && seen.captureHealth !== "complete"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      seen = await a.call("bgmon_inspect", { id: job.id });
+    }
+    assert.equal(seen.captureHealth, "complete");
+    const watch = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "LOST_FINAL_MATCH",
+      from: "retained",
+    });
+    Manager.prototype.watchRead = async function (id, stream, after) {
+      const page = await original.call(this, id, stream, after);
+      return id === job.id ? { ...page, status: { state: "lost", capture: "unknown" } } : page;
+    };
+    let state: any = {};
+    for (let i = 0; i < 200 && state.state !== "failed"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      state =
+        (await a.call("bgmon_watch", { action: "list" })).find((w: any) => w.id === watch.id) ?? {};
+    }
+    assert.equal(state.hits, 1);
+    assert.equal(state.state, "failed");
+    assert.equal(state.error, "capture_incomplete");
+  } finally {
+    Manager.prototype.watchRead = original;
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("late successful watch reads are consumed instead of perpetually retried", async () => {
+  const { Manager } = await import("../src/manager.ts");
+  const a = runtime("late-watch-read");
+  await a.start();
+  const original = Manager.prototype.watchRead;
+  try {
+    const job = await a.call("bgmon_start", { command: "sleep 0.5; echo LATE_MATCH; sleep 5" });
+    const watch = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "LATE_MATCH",
+    });
+    Manager.prototype.watchRead = async function (id, stream, after) {
+      const page = await original.call(this, id, stream, after);
+      if (id === job.id) await new Promise((resolve) => setTimeout(resolve, 1200));
+      return page;
+    };
+    let state: any = {};
+    for (let i = 0; i < 350 && state.state !== "fired"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      state =
+        (await a.call("bgmon_watch", { action: "list" })).find((w: any) => w.id === watch.id) ?? {};
+    }
+    assert.equal(state.state, "fired");
+    assert.equal(state.hits, 1);
+  } finally {
+    Manager.prototype.watchRead = original;
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("stalled removed watches obey per-owner and global IO bounds", async () => {
+  const { Manager } = await import("../src/manager.ts");
+  const { broker } = await import("../src/broker.ts");
+  const owners = Array.from({ length: 4 }, (_, i) => runtime(`watch-io-cap-${i}`));
+  const healthy = runtime("watch-io-cap-healthy");
+  const original = Manager.prototype.watchRead;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const slowIds = new Set<string>();
+  let calls = 0;
+  try {
+    for (const owner of owners) {
+      await owner.start();
+      const job = await owner.call("bgmon_start", { command: "sleep 15" });
+      slowIds.add(job.id);
+    }
+    Manager.prototype.watchRead = async function (id, stream, after) {
+      if (slowIds.has(id)) {
+        calls++;
+        await gate;
+      }
+      return original.call(this, id, stream, after);
+    };
+    for (let i = 0; i < owners.length; i++) {
+      const owner = owners[i],
+        id = [...slowIds][i];
+      for (let j = 0; j < (i === 0 ? 5 : 4); j++) {
+        const watch = await owner.call("bgmon_watch", {
+          action: "add",
+          monitorId: id,
+          kind: "any",
+        });
+        if (i === 0 && j === 4) {
+          assert.match(watch.error, /capacity exhausted/);
+          continue;
+        }
+        assert.ok(watch.id);
+        await (broker as any).tick();
+        await Promise.resolve();
+        assert.equal(
+          (await owner.call("bgmon_watch", { action: "remove", watchId: watch.id })).removed,
+          true,
+        );
+      }
+      if (i === 0) assert.equal(calls, 4);
+      if (i === 1) {
+        await healthy.start();
+        const job = await healthy.call("bgmon_start", {
+          command: "sleep 0.4; echo FAST_AFTER_STALL; sleep 4",
+        });
+        const watch = await healthy.call("bgmon_watch", {
+          action: "add",
+          monitorId: job.id,
+          kind: "contains",
+          pattern: "FAST_AFTER_STALL",
+        });
+        let state: any = {};
+        const deadline = Date.now() + 2500;
+        while (Date.now() < deadline && state.state !== "fired") {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          state =
+            (await healthy.call("bgmon_watch", { action: "list" })).find(
+              (w: any) => w.id === watch.id,
+            ) ?? {};
+        }
+        assert.equal(state.state, "fired");
+      }
+    }
+    assert.equal(calls, 16);
+    assert.equal((broker as any).ioInFlight, 16);
+  } finally {
+    Manager.prototype.watchRead = original;
+    release();
+    for (let i = 0; i < 100 && (broker as any).ioInFlight; i++)
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    for (const owner of owners) await owner.call("bgmon_control", { action: "server_stop" });
+    for (const owner of owners) await owner.close();
+    await healthy.call("bgmon_control", { action: "server_stop" });
+    await healthy.close();
+  }
+});
+
+test("renewing TTL cannot reuse a stale in-flight expiry boundary", async () => {
+  const { Manager } = await import("../src/manager.ts");
+  const a = runtime("renew-boundary");
+  await a.start();
+  const originalRead = Manager.prototype.watchRead,
+    originalBoundary = Manager.prototype.watchBoundary;
+  let release!: () => void, boundaryStarted!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const entered = new Promise<void>((resolve) => {
+    boundaryStarted = resolve;
+  });
+  try {
+    const job = await a.call("bgmon_start", { command: "sleep 1.6; echo RENEW_MATCH; sleep 4" });
+    const watch = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "RENEW_MATCH",
+      ttlSeconds: 1,
+    });
+    let firstRead = true,
+      firstBoundary = true;
+    Manager.prototype.watchRead = async function (id, stream, after) {
+      const page = await originalRead.call(this, id, stream, after);
+      if (id === job.id && firstRead) {
+        firstRead = false;
+        await gate;
+      }
+      return page;
+    };
+    Manager.prototype.watchBoundary = async function (id, stream) {
+      const snapshot = await originalBoundary.call(this, id, stream);
+      if (id === job.id && firstBoundary) {
+        firstBoundary = false;
+        boundaryStarted();
+        await gate;
+      }
+      return snapshot;
+    };
+    await entered;
+    assert.equal(
+      (await a.call("bgmon_watch", { action: "update", watchId: watch.id, ttlSeconds: 1 })).state,
+      "active",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    release();
+    let state: any = {};
+    for (let i = 0; i < 250; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      state =
+        (await a.call("bgmon_watch", { action: "list" })).find((w: any) => w.id === watch.id) ?? {};
+      if (state.state && state.state !== "active") break;
+    }
+    if (state.state === "fired") assert.equal(state.hits, 1);
+    else {
+      assert.equal(state.state, "failed");
+      assert.equal(state.error, "expiry_boundary_unavailable");
+      assert.equal(state.hits, 0);
+    }
+  } finally {
+    Manager.prototype.watchRead = originalRead;
+    Manager.prototype.watchBoundary = originalBoundary;
+    release();
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("an exit observed after the expiry deadline does not trigger an exit watch", async () => {
+  const { Manager } = await import("../src/manager.ts");
+  const a = runtime("exit-deadline");
+  await a.start();
+  const original = Manager.prototype.watchStatus;
+  let release!: () => void, entered!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const reading = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  try {
+    const job = await a.call("bgmon_start", { command: "sleep 1.2; exit 0" });
+    const watch = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "exit",
+      ttlSeconds: 1,
+    });
+    Manager.prototype.watchStatus = async function (id, stream) {
+      const page = await original.call(this, id, stream);
+      if (id === job.id) {
+        entered();
+        await gate;
+      }
+      return page;
+    };
+    await reading;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    release();
+    let state: any = {};
+    for (let i = 0; i < 100 && state.state !== "expired"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      state =
+        (await a.call("bgmon_watch", { action: "list" })).find((w: any) => w.id === watch.id) ?? {};
+    }
+    assert.equal(state.state, "expired");
+    assert.equal(state.hits, 0);
+  } finally {
+    Manager.prototype.watchStatus = original;
+    release();
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("a journal gap fails closed instead of matching uncertain OSC payload", async () => {
+  const { readdir, writeFile } = await import("node:fs/promises");
+  const a = runtime("gap-osc");
+  await a.start();
+  try {
+    const job = await a.call("bgmon_start", { command: "echo seed" });
+    let seen: any = {};
+    for (let i = 0; i < 200 && seen.captureHealth !== "complete"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      seen = await a.call("bgmon_inspect", { id: job.id });
+    }
+    assert.equal(seen.captureHealth, "complete");
+    const dir = join(
+      process.env.XDG_STATE_HOME!,
+      "pi-background-monitor",
+      "owners",
+      job.logRef.owner,
+      job.logRef.stream,
+    );
+    for (const name of await readdir(dir)) if (name.endsWith(".jsonl")) await rm(join(dir, name));
+    const encode = (sequence: number, start: number, text: string) => {
+      const data = Buffer.from(text);
+      return JSON.stringify({
+        version: 1,
+        stream: job.logRef.stream,
+        sequence,
+        start,
+        end: start + data.length,
+        kind: "output",
+        data: data.toString("base64"),
+      });
+    };
+    await writeFile(
+      join(dir, "1.jsonl"),
+      `${encode(1, 0, "safe\n")}\n${encode(3, 20, "\nFALSE_MATCH\n")}\n`,
+      { mode: 0o600 },
+    );
+    await writeFile(
+      join(dir, "capture.json"),
+      JSON.stringify({
+        version: 1,
+        stream: job.logRef.stream,
+        first: 1,
+        tail: 3,
+        health: "complete",
+      }),
+      { mode: 0o600 },
+    );
+    const watch = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "FALSE_MATCH",
+      from: "retained",
+    });
+    let state: any = {};
+    for (let i = 0; i < 200 && state.state !== "failed"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      state =
+        (await a.call("bgmon_watch", { action: "list" })).find((w: any) => w.id === watch.id) ?? {};
+    }
+    assert.equal(state.state, "failed");
+    assert.equal(state.error, "parser_uncertain_after_gap");
+    assert.equal(state.hits, 0);
+  } finally {
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("new watches remain usable after normal journal rotation", async () => {
+  const { TextNormalizer } = await import("../src/text.mjs");
+  const { readdir, writeFile } = await import("node:fs/promises");
+  const a = runtime("rotated-checkpoint");
+  await a.start();
+  try {
+    const job = await a.call("bgmon_start", { command: "echo seed" });
+    let seen: any = {};
+    for (let i = 0; i < 200 && seen.captureHealth !== "complete"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      seen = await a.call("bgmon_inspect", { id: job.id });
+    }
+    assert.equal(seen.captureHealth, "complete");
+    const dir = join(
+      process.env.XDG_STATE_HOME!,
+      "pi-background-monitor",
+      "owners",
+      job.logRef.owner,
+      job.logRef.stream,
+    );
+    for (const name of await readdir(dir)) if (name.endsWith(".jsonl")) await rm(join(dir, name));
+    const normalizer = new TextNormalizer();
+    normalizer.write(Buffer.from("old-partial"));
+    const firstText = normalizer.snapshot();
+    const data = Buffer.from("-tail\nRETAIN_MATCH\n");
+    normalizer.write(data);
+    const tailText = normalizer.snapshot();
+    const frame = {
+      version: 1,
+      stream: job.logRef.stream,
+      sequence: 2,
+      start: 11,
+      end: 11 + data.length,
+      kind: "output",
+      data: data.toString("base64"),
+    };
+    await writeFile(join(dir, "2.jsonl"), `${JSON.stringify(frame)}\n`, { mode: 0o600 });
+    await writeFile(
+      join(dir, "capture.json"),
+      JSON.stringify({
+        version: 1,
+        stream: job.logRef.stream,
+        first: 2,
+        tail: 2,
+        health: "complete",
+        firstText,
+        tailText,
+      }),
+      { mode: 0o600 },
+    );
+    const retained = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "RETAIN_MATCH",
+      from: "retained",
+    });
+    const now = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "any",
+      from: "now",
+    });
+    const exit = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "exit",
+      from: "retained",
+    });
+    let list: any[] = [];
+    for (let i = 0; i < 200; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      list = await a.call("bgmon_watch", { action: "list" });
+      if (
+        [retained, now, exit].every((w) => list.find((x: any) => x.id === w.id)?.state !== "active")
+      )
+        break;
+    }
+    assert.equal(list.find((w) => w.id === retained.id).state, "fired");
+    assert.equal(list.find((w) => w.id === retained.id).prefixMissing, true);
+    assert.equal(list.find((w) => w.id === now.id).state, "completed_no_match");
+    assert.equal(list.find((w) => w.id === exit.id).state, "fired");
+  } finally {
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("repeated TTL renewals do not multiply a stalled boundary read", async () => {
+  const { Manager } = await import("../src/manager.ts");
+  const a = runtime("renew-stalled-boundary");
+  await a.start();
+  const original = Manager.prototype.watchBoundary;
+  let release!: () => void, entered!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let calls = 0;
+  try {
+    const job = await a.call("bgmon_start", { command: "sleep 15" });
+    const watch = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "NEVER",
+      ttlSeconds: 1,
+    });
+    Manager.prototype.watchBoundary = async function (id, stream) {
+      if (id === job.id) {
+        calls++;
+        entered();
+        await gate;
+      }
+      return original.call(this, id, stream);
+    };
+    await started;
+    for (let i = 0; i < 3; i++) {
+      assert.equal(
+        (await a.call("bgmon_watch", { action: "update", watchId: watch.id, ttlSeconds: 1 })).state,
+        "active",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    const state = (await a.call("bgmon_watch", { action: "list" })).find(
+      (w: any) => w.id === watch.id,
+    );
+    assert.equal(state.state, "failed");
+    assert.equal(state.error, "expiry_boundary_unavailable");
+    assert.equal(calls, 1);
+  } finally {
+    Manager.prototype.watchBoundary = original;
+    release();
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("stalled watch initialization does not block control or install into a closed binding", async () => {
+  const { Manager } = await import("../src/manager.ts");
+  const a = runtime("init-slow-owner"),
+    b = runtime("init-live-sibling");
+  await a.start();
+  await b.start();
+  const original = Manager.prototype.watchStart;
+  let release!: () => void, entered!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const started = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  try {
+    const slow = await a.call("bgmon_start", { command: "sleep 10" });
+    const fast = await b.call("bgmon_start", { command: "sleep 0.8; echo INIT_READY; sleep 3" });
+    Manager.prototype.watchStart = async function (id, from, exit) {
+      if (id === slow.id) {
+        entered();
+        await gate;
+      }
+      return original.call(this, id, from, exit);
+    };
+    const pending = a.call("bgmon_watch", { action: "add", monitorId: slow.id, kind: "any" });
+    await started;
+    const control = await Promise.race([
+      a.call("bgmon_control", { action: "forget", id: slow.id }),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 800)),
+    ]);
+    assert.ok(control, "control must not wait for watch initialization");
+    assert.match(control.error, /running/);
+    const watch = await b.call("bgmon_watch", {
+      action: "add",
+      monitorId: fast.id,
+      kind: "contains",
+      pattern: "INIT_READY",
+    });
+    await a.close();
+    release();
+    assert.match((await pending).error, /binding or source changed/);
+    let state: any = {};
+    for (let i = 0; i < 200 && state.state !== "fired"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      state =
+        (await b.call("bgmon_watch", { action: "list" })).find((w: any) => w.id === watch.id) ?? {};
+    }
+    assert.equal(state.state, "fired");
+    assert.equal(a.messages.length, 0);
+  } finally {
+    Manager.prototype.watchStart = original;
+    release();
+    await b.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+    await b.close();
+  }
+});
+
+test("expiry fails visibly if the only boundary includes post-deadline output", async () => {
+  const { Manager } = await import("../src/manager.ts");
+  const a = runtime("expiry-after-deadline");
+  await a.start();
+  const original = Manager.prototype.watchBoundary;
+  try {
+    const job = await a.call("bgmon_start", { command: "sleep 1.2; echo TOO_LATE; sleep 3" });
+    const watch = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "TOO_LATE",
+      ttlSeconds: 1,
+    });
+    Manager.prototype.watchBoundary = async function (id, stream) {
+      if (id === job.id) await new Promise((resolve) => setTimeout(resolve, 600));
+      return original.call(this, id, stream);
+    };
+    let state: any = {};
+    for (let i = 0; i < 250; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      state =
+        (await a.call("bgmon_watch", { action: "list" })).find((w: any) => w.id === watch.id) ?? {};
+      if (state.state && state.state !== "active") break;
+    }
+    assert.equal(state.state, "failed");
+    assert.equal(state.error, "expiry_boundary_unavailable");
+    assert.equal(state.hits, 0);
+  } finally {
+    Manager.prototype.watchBoundary = original;
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("an eligible rotation gap resumes only from a valid paired checkpoint", async () => {
+  const { Manager } = await import("../src/manager.ts");
+  const { TextNormalizer } = await import("../src/text.mjs");
+  const a = runtime("gap-checkpoint-resume");
+  await a.start();
+  const original = Manager.prototype.watchRead;
+  try {
+    const job = await a.call("bgmon_start", { command: "sleep 8" });
+    const watch = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "ACTUAL_MATCH",
+    });
+    const parser = new TextNormalizer();
+    const prefix = Buffer.from("\x1b]hidden");
+    parser.write(prefix);
+    const firstText = parser.snapshot();
+    const data = Buffer.from("\nFALSE_PAYLOAD\x07ACTUAL_MATCH\n");
+    let delivered = false;
+    Manager.prototype.watchRead = async function (id, stream, after) {
+      const page = await original.call(this, id, stream, after);
+      if (id === job.id && !delivered) {
+        delivered = true;
+        return {
+          ...page,
+          first: 2,
+          tail: 2,
+          next: 2,
+          gap: true,
+          firstText,
+          frames: [{ sequence: 2, start: prefix.length, end: prefix.length + data.length, data }],
+        };
+      }
+      return page;
+    };
+    let state: any = {};
+    for (let i = 0; i < 200 && state.state !== "fired"; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      state =
+        (await a.call("bgmon_watch", { action: "list" })).find((w: any) => w.id === watch.id) ?? {};
+    }
+    assert.equal(state.state, "fired");
+    assert.equal(state.hits, 1);
+    assert.equal(state.gaps, 1);
+  } finally {
+    Manager.prototype.watchRead = original;
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("post-deadline clean EOF cannot reuse an earlier output proof", async () => {
+  const { Manager } = await import("../src/manager.ts");
+  const a = runtime("expiry-eof-generation");
+  await a.start();
+  const original = Manager.prototype.watchBoundary;
+  try {
+    const job = await a.call("bgmon_start", {
+      command: "sleep 0.3; printf FINAL_AFTER_EXPIRY; sleep 0.9",
+    });
+    const watch = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "FINAL_AFTER_EXPIRY",
+      ttlSeconds: 1,
+    });
+    Manager.prototype.watchBoundary = async function (id, stream) {
+      if (id === job.id) await new Promise((resolve) => setTimeout(resolve, 700));
+      return original.call(this, id, stream);
+    };
+    let state: any = {};
+    for (let i = 0; i < 250; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      state =
+        (await a.call("bgmon_watch", { action: "list" })).find((w: any) => w.id === watch.id) ?? {};
+      if (state.state && state.state !== "active") break;
+    }
+    assert.equal(state.state, "failed");
+    assert.equal(state.error, "expiry_boundary_unavailable");
+    assert.equal(state.hits, 0);
+  } finally {
+    Manager.prototype.watchBoundary = original;
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
   }
 });

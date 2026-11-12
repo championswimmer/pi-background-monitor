@@ -1,9 +1,19 @@
 import { constants } from "node:fs";
 import { open, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import type { TextCheckpoint } from "./text.mjs";
 
 export type Frame = { sequence: number; start: number; end: number; data: Buffer };
-type State = { version: number; stream: string; first: number; tail: number; health: string };
+type State = {
+  version: number;
+  stream: string;
+  first: number;
+  tail: number;
+  health: string;
+  generation?: number;
+  firstText?: TextCheckpoint;
+  tailText?: TextCheckpoint;
+};
 const MAX_SEGMENT = 1024 * 1024;
 export async function readPrivateFile(path: string, limit: number) {
   const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -27,7 +37,7 @@ export async function readPrivateFile(path: string, limit: number) {
 function integer(value: unknown): value is number {
   return Number.isSafeInteger(value) && (value as number) >= 0;
 }
-async function state(dir: string, stream: string): Promise<State> {
+export async function journalInfo(dir: string, stream: string): Promise<State> {
   const s = JSON.parse(
     (await readPrivateFile(join(dir, "capture.json"), 4096)).toString(),
   ) as State;
@@ -38,10 +48,32 @@ async function state(dir: string, stream: string): Promise<State> {
     s.first < 1 ||
     !integer(s.tail) ||
     s.first > s.tail + 1 ||
+    (s.generation !== undefined && !integer(s.generation)) ||
     !["ready", "complete", "failed"].includes(s.health)
   )
     throw new Error("Invalid capture metadata");
   return s;
+}
+export async function journalBoundary(dir: string, stream: string) {
+  const info = await journalInfo(dir, stream);
+  try {
+    const proof = JSON.parse(
+      (await readPrivateFile(join(dir, "published.json"), 4096)).toString("utf8"),
+    );
+    if (
+      proof.version === 1 &&
+      proof.stream === stream &&
+      proof.tail === info.tail &&
+      info.generation !== undefined &&
+      proof.generation === info.generation &&
+      typeof proof.publishedClock === "string" &&
+      /^\d{1,24}$/.test(proof.publishedClock)
+    )
+      return { ...info, publishedClock: proof.publishedClock as string | undefined };
+  } catch {
+    /* Missing or unreadable proof cannot establish a deadline boundary. */
+  }
+  return { ...info, publishedClock: undefined as string | undefined };
 }
 function frame(line: string, stream: string): Frame {
   const f = JSON.parse(line);
@@ -63,15 +95,15 @@ function frame(line: string, stream: string): Frame {
     throw new Error("Invalid journal payload");
   return { sequence: f.sequence, start: f.start, end: f.end, data };
 }
-export async function readJournal(
+async function readJournalOnce(
   dir: string,
   stream: string,
-  after = 0,
-  maxBytes = 256 * 1024,
-  maxFrames = 200,
+  after: number,
+  maxBytes: number,
+  maxFrames: number,
 ) {
   if (!integer(after)) throw new Error("Invalid journal cursor");
-  const metadata = await state(dir, stream);
+  const metadata = await journalInfo(dir, stream);
   if (after > metadata.tail) throw new Error("Journal cursor is beyond the published tail");
   if (!integer(maxBytes) || maxBytes < 16384 || !integer(maxFrames) || maxFrames < 1)
     throw new Error("Invalid journal read limit");
@@ -84,8 +116,12 @@ export async function readJournal(
   const names = (await readdir(dir))
     .filter((n) => /^(?:0|[1-9]\d*)\.jsonl$/.test(n))
     .sort((a, b) => Number.parseInt(a, 10) - Number.parseInt(b, 10));
-  for (const name of names) {
+  for (let index = 0; index < names.length; index++) {
+    const name = names[index];
     if (next >= metadata.tail || frames.length >= maxFrames || bytes >= maxBytes) break;
+    // A segment ending before the next cursor cannot contribute eligible data.
+    const following = names[index + 1];
+    if (following && Number.parseInt(following, 10) <= next + 1) continue;
     let text: string;
     try {
       text = (await readPrivateFile(join(dir, name), MAX_SEGMENT)).toString("utf8");
@@ -140,12 +176,34 @@ export async function readJournal(
     gap = true;
     next = metadata.tail;
   }
-  return { first: metadata.first, tail: metadata.tail, next, gap, health: metadata.health, frames };
+  return {
+    first: metadata.first,
+    tail: metadata.tail,
+    next,
+    gap,
+    health: metadata.health,
+    firstText: metadata.firstText,
+    frames,
+  };
+}
+
+export async function readJournal(
+  dir: string,
+  stream: string,
+  after = 0,
+  maxBytes = 256 * 1024,
+  maxFrames = 200,
+) {
+  for (let attempt = 0; ; attempt++) {
+    const page = await readJournalOnce(dir, stream, after, maxBytes, maxFrames);
+    if (!page.gap || page.frames[0]?.sequence === page.first || attempt >= 2) return page;
+    if ((await journalInfo(dir, stream)).first === page.first) return page;
+  }
 }
 
 /** Read the newest committed bytes without a forward scan that can stop short. */
 export async function readJournalTail(dir: string, stream: string, maxBytes = 65536) {
-  const metadata = await state(dir, stream);
+  const metadata = await journalInfo(dir, stream);
   const names = (await readdir(dir))
     .filter((n) => /^(?:0|[1-9]\d*)\.jsonl$/.test(n))
     .sort((a, b) => Number.parseInt(b, 10) - Number.parseInt(a, 10));

@@ -21,14 +21,17 @@ type Snapshot = {
   clientTruncated?: boolean;
   gap?: boolean;
   captureHealth?: string;
+  parserUncertain?: boolean;
 };
 type Viewer = { inspect: (id: string) => Promise<unknown>; signal: AbortSignal };
 type Job = { id: string; state: string; command?: string };
 type Watch = {
   job: string;
   kind: string;
-  intervalSeconds: number;
-  expires: string;
+  expires?: string;
+  state: string;
+  hits: number;
+  gaps: number;
   delivery: string;
   id: string;
 };
@@ -216,10 +219,12 @@ export async function dashboard(
           const flags =
             snapshot?.untrustedOutput?.truncated || snapshot?.clientTruncated ? " · truncated" : "";
           const warning = snapshot?.gap
-            ? "history gap"
-            : snapshot?.captureHealth && !["ready", "complete"].includes(snapshot.captureHealth)
-              ? `capture ${safe(snapshot.captureHealth)}`
-              : "";
+            ? "history gap; parser context uncertain"
+            : snapshot?.parserUncertain
+              ? "parser context uncertain"
+              : snapshot?.captureHealth && !["ready", "complete"].includes(snapshot.captureHealth)
+                ? `capture ${safe(snapshot.captureHealth)}`
+                : "";
           const lines = [
             ...tabs,
             theme.fg(
@@ -310,7 +315,7 @@ export async function dashboard(
             lines.push(`Watches: ${own.length} in this session`);
             for (const w of own.slice(0, 3))
               lines.push(
-                `  ${safe(w.kind)} · every ${w.intervalSeconds}s · expires ${safe(w.expires)} · ${safe(w.delivery)}`,
+                `  ${safe(w.kind)} · ${safe(w.state)} · hits ${w.hits} · gaps ${w.gaps} · ${safe(w.delivery)}`,
               );
             if (own.length > 3) lines.push(`  +${own.length - 3} more watches`);
           }

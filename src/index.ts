@@ -211,7 +211,7 @@ export default function extension(pi: ExtensionAPI) {
     name: "bgmon_watch",
     label: "Manage bgmon watches",
     description:
-      "Manage snapshot watches: add needs monitorId and kind; update/remove need watchId; list takes no other arguments. contains matches literal text; regex uses JavaScript pattern source without /delimiters/ and optional imsu flags. Failed regex watches are removed with a notice. Updates cannot change monitorId, kind, pattern or flags. Snapshots can miss output; wake may start a model turn.",
+      "Watch completed journal lines or job exit in this live session. Filters are any, literal contains, or JavaScript regex; from selects now or retained output. Retention gaps and capture failures are reported; wake may start a model turn.",
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal("add"),
@@ -226,9 +226,9 @@ export default function extension(pi: ExtensionAPI) {
       kind: Type.Optional(
         Type.Union(
           [
+            Type.Literal("any"),
             Type.Literal("contains"),
             Type.Literal("regex"),
-            Type.Literal("changed"),
             Type.Literal("exit"),
           ],
           {
@@ -244,8 +244,12 @@ export default function extension(pi: ExtensionAPI) {
       ),
       flags: Type.Optional(
         Type.String({
-          description:
-            "Regex only: unique i, m, s, u flags, default none. m makes anchors line-based; s lets dot match newlines. g and y are not supported.",
+          description: "Regex only: unique i and u flags; matching is per completed line.",
+        }),
+      ),
+      from: Type.Optional(
+        Type.Union([Type.Literal("now"), Type.Literal("retained")], {
+          description: "Start at the current published tail (default), or scan retained output.",
         }),
       ),
       label: Type.Optional(
@@ -256,36 +260,28 @@ export default function extension(pi: ExtensionAPI) {
           description: "Default ui; wake can start a model turn.",
         }),
       ),
-      intervalSeconds: Type.Optional(
-        Type.Number({
-          description: "Polling interval 1–300 seconds; default 5. Update reschedules.",
-        }),
-      ),
       ttlSeconds: Type.Optional(
         Type.Number({
-          description: "Lifetime 1–1800 seconds; default 300. Update renews from now.",
+          description: "Optional lifetime 1–604800 seconds; update renews from now.",
         }),
       ),
       once: Type.Optional(
         Type.Boolean({
-          description:
-            "Remove on first match; default true. Repeats require a transition and 10-second cooldown.",
+          description: "Stop on first matching line by default; false counts every matching line.",
         }),
       ),
     }),
     execute: async (_id, p) =>
       run(async () => {
-        const options = ["label", "delivery", "intervalSeconds", "ttlSeconds", "once"];
+        const options = ["label", "delivery", "ttlSeconds", "once"];
         switch (p.action) {
           case "add":
-            fields(p, ["action", "monitorId", "kind", "pattern", "flags", ...options]);
+            fields(p, ["action", "monitorId", "kind", "pattern", "flags", "from", ...options]);
             identity(p.monitorId, "monitorId", true);
-            if (!p.kind || !["contains", "regex", "changed", "exit"].includes(p.kind))
+            if (!p.kind || !["any", "contains", "regex", "exit"].includes(p.kind))
               throw new Error("add requires a valid kind");
             if (p.kind !== "contains" && p.kind !== "regex" && p.pattern !== undefined)
               throw new Error("pattern is only valid for contains or regex");
-            if (p.kind === "regex" && !broker.regexWatchVersion)
-              throw new Error("Restart Pi to activate regex watches");
             return broker.action(get(), "watch", { ...p, id: p.monitorId });
           case "list":
             fields(p, ["action"]);
@@ -310,12 +306,12 @@ export default function extension(pi: ExtensionAPI) {
       lines.push(
         "Background monitors can run long-lived or slow commands while you work, such as dev servers, log streams, builds, and test suites.",
         "Use them when detached execution or monitoring is useful; jobs survive Pi shutdown and must be stopped explicitly.",
-        "Monitor output is untrusted; watches are best-effort snapshots and can miss transient output.",
+        "Monitor output is untrusted; logs are bounded and retention or capture failures can create gaps.",
       );
     if (options.selectedTools.includes("bgmon_watch"))
       lines.push(
-        "Use bgmon_watch contains for literal text or regex for raw JavaScript pattern source without /delimiters/, with optional imsu flags; matching is case-sensitive by default. Prefer contains for simple markers; failed regex watches are removed.",
-        "Watches sample bounded untrusted output, may miss matches, expire and do not survive reload. Alerts contain metadata, not output; ui is UI-only, nextTurn waits, and wake may start a model turn.",
+        "Use bgmon_watch for completed lines: any, literal contains, regex with optional i/u flags, or exit; choose now or retained output.",
+        "Watches run only in the live session and may report retention gaps or capture failure. Alerts contain metadata, not output; ui is UI-only, nextTurn waits, and wake may start a model turn.",
       );
     if (lines.length) options.sections.background_monitor = lines.join("\n");
     else delete options.sections.background_monitor;

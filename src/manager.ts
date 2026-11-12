@@ -2,11 +2,18 @@ import { createHash, randomBytes } from "node:crypto";
 import { lstat, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readJournal, readJournalTail, readPrivateFile } from "./journal.ts";
+import {
+  journalBoundary,
+  journalInfo,
+  readJournal,
+  readJournalTail,
+  readPrivateFile,
+} from "./journal.ts";
 import { MAX_MONITORS } from "./limits.ts";
 import { bounded, quote, sanitize } from "./output.ts";
 import { readStopProof, writeStopProof } from "./proof.ts";
 import { type LogRef, LogStorage } from "./storage.ts";
+import { TextNormalizer } from "./text.mjs";
 import { checked, createDirectory, probe, Tmux, withTimeout } from "./tmux.ts";
 
 type Job = {
@@ -134,10 +141,16 @@ export class Manager {
     try {
       const script = join(dir, "command.sh");
       await writeFile(script, command, { mode: 0o600, flag: "wx" });
-      const source = await readFile(fileURLToPath(new URL("./capture.mjs", import.meta.url)));
-      const hash = createHash("sha256").update(source).digest("hex");
+      const [source, textSource] = await Promise.all([
+        readFile(fileURLToPath(new URL("./capture.mjs", import.meta.url))),
+        readFile(fileURLToPath(new URL("./text.mjs", import.meta.url))),
+      ]);
+      if (source.length > 65536 || textSource.length > 65536)
+        throw new Error("Capture runtime is oversized");
+      const hash = createHash("sha256").update(source).update(textSource).digest("hex");
       const runtime = join(dir, `capture-${hash}.mjs`);
       await writeFile(runtime, source, { mode: 0o600, flag: "wx" });
+      await writeFile(join(dir, "text.mjs"), textSource, { mode: 0o600, flag: "wx" });
       this.persist(ref);
       this.jobsById.set(job.id, job);
       const first = !(await this.verified());
@@ -246,7 +259,25 @@ export class Manager {
         cursor = { sequence: f.sequence - 1, offset: 0 };
       }
     }
-    const output = bounded(page.data.subarray(0, end).toString("utf8"));
+    const firstFrame = page.frames[0];
+    const normalizer = firstFrame
+      ? await this.normalizerAt(
+          dir,
+          ref.stream,
+          { sequence: firstFrame.sequence - 1, offset: 0 },
+          page.first,
+        )
+      : new TextNormalizer();
+    let clipped = page.frames.reduce((sum, f) => sum + f.data.length, 0) - page.data.length;
+    for (const frame of page.frames) {
+      if (clipped <= 0) break;
+      const count = Math.min(clipped, frame.data.length);
+      normalizer.write(frame.data.subarray(0, count));
+      clipped -= count;
+    }
+    let text = normalizer.write(page.data.subarray(0, end));
+    if (page.health !== "ready") text += normalizer.end();
+    const output = bounded(text);
     output.truncated ||= page.truncated;
     return {
       untrustedOutput: output,
@@ -256,7 +287,49 @@ export class Manager {
       gap: page.gap,
       captureHealth: page.health,
       pendingUtf8,
+      parserOverflow: normalizer.overflow,
+      parserUncertain: false,
     };
+  }
+  private async normalizerAt(
+    dir: string,
+    stream: string,
+    after: LogCursor,
+    expectedFirst?: number,
+  ) {
+    const initial = await journalInfo(dir, stream);
+    if (
+      (expectedFirst !== undefined && initial.first !== expectedFirst) ||
+      after.sequence < initial.first - 1
+    )
+      throw new Error("Journal rotated during inspection; retry");
+    if (initial.first > 1 && !initial.firstText)
+      throw new Error("Retained parser checkpoint unavailable");
+    const normalizer = initial.firstText
+      ? new TextNormalizer(initial.firstText)
+      : new TextNormalizer();
+    let cursor = initial.first - 1;
+    let reached = cursor === after.sequence && after.offset === 0;
+    while (!reached && cursor < after.sequence) {
+      const page = await readJournal(dir, stream, cursor);
+      if (page.first !== initial.first || page.gap)
+        throw new Error("Journal changed during inspection; retry");
+      for (const f of page.frames) {
+        if (f.sequence > after.sequence) break;
+        normalizer.write(
+          f.sequence === after.sequence && after.offset ? f.data.subarray(0, after.offset) : f.data,
+        );
+        if (f.sequence === after.sequence) {
+          reached = true;
+          break;
+        }
+      }
+      if (page.next <= cursor) break;
+      cursor = page.next;
+    }
+    if (!reached || (await journalInfo(dir, stream)).first !== initial.first)
+      throw new Error("Journal changed during inspection; retry");
+    return normalizer;
   }
   private async readForward(ref: LogRef, after: LogCursor) {
     if (
@@ -288,7 +361,8 @@ export class Manager {
     let cut = Math.min(data.length, Math.floor(16384 / 3)),
       lines = 0;
     for (let i = 0; i < cut; i++) {
-      if (data[i] === 10 && ++lines === 199) {
+      // CR is also normalized to a line break; counting CRLF twice is conservative.
+      if ((data[i] === 10 || data[i] === 13) && ++lines === 199) {
         cut = i + 1;
         break;
       }
@@ -318,15 +392,89 @@ export class Manager {
       }
     }
     const more = (cut < data.length && !pendingUtf8) || page.next < page.tail;
+    if (page.gap && page.frames.length && page.frames[0].sequence !== page.first)
+      throw new Error("Parser checkpoint unavailable after journal gap");
+    const start = page.gap ? { sequence: page.first - 1, offset: 0 } : after;
+    const normalizer =
+      page.gap && !page.frames.length
+        ? new TextNormalizer()
+        : await this.normalizerAt(dir, ref.stream, start, page.first);
+    let text = normalizer.write(data.subarray(0, cut));
+    if (!more && !pendingUtf8 && page.health !== "ready") text += normalizer.end();
     return {
-      untrustedOutput: { text: sanitize(data.subarray(0, cut).toString("utf8")), truncated: more },
+      untrustedOutput: { text, truncated: more },
       first: page.first,
       tail: page.tail,
       next: cursor,
       gap: page.gap,
       captureHealth: page.health,
       pendingUtf8,
+      parserOverflow: normalizer.overflow,
+      parserUncertain: page.gap && !page.frames.length,
     };
+  }
+  async watchStart(jobId: string, from: "now" | "retained", exit = false) {
+    const job = this.find(jobId);
+    const dir = await this.storage.resolve(job.ref);
+    const info = await journalInfo(dir, job.ref.stream);
+    if (exit)
+      return {
+        stream: job.ref.stream,
+        cursor: info.tail,
+        normalizer: new TextNormalizer(),
+        skipPartial: false,
+        gap: false,
+        prefixMissing: false,
+      };
+    if (from === "now") {
+      const normalizer = info.tailText
+        ? new TextNormalizer(info.tailText)
+        : await this.normalizerAt(dir, job.ref.stream, { sequence: info.tail, offset: 0 });
+      return {
+        stream: job.ref.stream,
+        cursor: info.tail,
+        normalizer,
+        skipPartial: !normalizer.atLineBoundary || !!normalizer.snapshot().pending,
+        gap: info.first > 1 && !info.tailText && !info.firstText,
+        prefixMissing: false,
+      };
+    }
+    const normalizer = info.firstText ? new TextNormalizer(info.firstText) : new TextNormalizer();
+    return {
+      stream: job.ref.stream,
+      cursor: info.first - 1,
+      normalizer,
+      skipPartial:
+        info.first > 1 && (!normalizer.atLineBoundary || !!normalizer.snapshot().pending),
+      gap: info.first > 1 && !info.firstText,
+      prefixMissing: info.first > 1,
+    };
+  }
+  async watchBoundary(jobId: string, stream: string) {
+    const job = this.find(jobId);
+    if (job.ref.stream !== stream) throw new Error("Watch source changed");
+    return journalBoundary(await this.storage.resolve(job.ref), stream);
+  }
+  async watchStatus(jobId: string, stream: string) {
+    const job = this.find(jobId);
+    if (job.ref.stream !== stream) throw new Error("Watch source changed");
+    const info = await journalInfo(await this.storage.resolve(job.ref), stream);
+    return {
+      first: info.first,
+      tail: info.tail,
+      next: info.tail,
+      health: info.health,
+      firstText: info.firstText,
+      gap: false,
+      frames: [],
+      status: await this.status(job),
+    };
+  }
+  async watchRead(jobId: string, stream: string, after: number) {
+    const job = this.find(jobId);
+    if (job.ref.stream !== stream) throw new Error("Watch source changed");
+    const page = await readJournal(await this.storage.resolve(job.ref), stream, after);
+    return { ...page, status: await this.status(job) };
   }
   async inspect(jobId: string, after?: LogCursor) {
     const job = this.find(jobId);
@@ -473,6 +621,9 @@ export class Manager {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     throw new Error("Capture completion cannot be verified; refuse cleanup");
+  }
+  hasSource(jobId: string, stream: string) {
+    return this.jobsById.get(jobId)?.ref.stream === stream;
   }
   hasRef(ref: LogRef) {
     return [...this.jobsById.values()].some(

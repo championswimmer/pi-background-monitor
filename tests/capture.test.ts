@@ -118,6 +118,7 @@ test("rotation preserves the committed oldest segment if the new segment fails",
       );
     assert.notEqual(modified, source);
     await writeFile(runtime, modified);
+    await writeFile(join(d.dir, "text.mjs"), await readFile(resolve("src/text.mjs")));
     const sink = spawn(process.execPath, [runtime, dir, "nonce", "stream"], {
       stdio: ["pipe", "ignore", "ignore"],
     });
@@ -151,6 +152,7 @@ test("a sink becoming ready after the startup deadline never releases the gate",
     );
     assert.notEqual(delayed, source);
     await writeFile(runtime, delayed);
+    await writeFile(join(d.dir, "text.mjs"), await readFile(resolve("src/text.mjs")));
     await writeFile(script, `touch '${marker}'\n`);
     await assert.rejects(tm.startCaptured(script, d.dir, true, dir, runtime));
     await new Promise((resolve) => setTimeout(resolve, 1800));
@@ -308,6 +310,88 @@ test("a respawned pane is not killed or proved dead by the old supervisor", asyn
     tm.sourceOperation = operation;
     tm.stopCaptureSupervisors();
     await checked(tm.args("kill-server")).catch(() => {});
+    await rm(d.dir, { recursive: true, force: true });
+  }
+});
+
+test("capture publishes parser checkpoints for rotated segment boundaries", async () => {
+  const { readJournal } = await import("../src/journal.ts");
+  const { TextNormalizer } = await import("../src/text.mjs");
+  const d = await createDirectory();
+  try {
+    const dir = join(d.dir, "capture");
+    await mkdir(dir);
+    const source = await readFile(resolve("src/capture.mjs"), "utf8");
+    const modified = source
+      .replace("const MAX_SEGMENT = 1024 * 1024;", "const MAX_SEGMENT = 32 * 1024;")
+      .replace("const MAX_SEGMENTS = 8;", "const MAX_SEGMENTS = 2;");
+    assert.notEqual(modified, source);
+    const runtime = join(d.dir, "rotation.mjs");
+    await writeFile(runtime, modified);
+    await writeFile(join(d.dir, "text.mjs"), await readFile(resolve("src/text.mjs")));
+    const sink = spawn(process.execPath, [runtime, dir, "nonce", "stream"], {
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    sink.stdin.end(Buffer.from(`prefix\n${"x".repeat(100000)}\nEND\n`));
+    const code = await new Promise((resolve) => sink.on("close", resolve));
+    assert.equal(code, 0);
+    const state = JSON.parse(await readFile(join(dir, "capture.json"), "utf8"));
+    assert.ok(state.first > 1);
+    assert.equal(state.firstText.atLineBoundary, false);
+    assert.equal(state.tailText.atLineBoundary, true);
+    const normalizer = new TextNormalizer(state.firstText);
+    const page = await readJournal(dir, "stream", state.first - 1);
+    const text = page.frames.map((f) => normalizer.write(f.data)).join("");
+    assert.match(text, /\nEND\n$/);
+  } finally {
+    await rm(d.dir, { recursive: true, force: true });
+  }
+});
+
+test("publication proof is sampled after a delayed metadata rename", async () => {
+  const { journalBoundary } = await import("../src/journal.ts");
+  const d = await createDirectory();
+  try {
+    const dir = join(d.dir, "capture");
+    await mkdir(dir);
+    const source = await readFile(resolve("src/capture.mjs"), "utf8");
+    const modified = source.replace(
+      'await rename(tmp, join(dir, "capture.json"));',
+      'if (state.tail === 1) { await writeFile(join(dir, "blocked"), process.hrtime.bigint().toString(), { mode: 0o600 }); await new Promise((resolve) => setTimeout(resolve, 400)); } await rename(tmp, join(dir, "capture.json"));',
+    );
+    assert.notEqual(modified, source);
+    const runtime = join(d.dir, "delayed-publish.mjs");
+    await writeFile(runtime, modified);
+    await writeFile(join(d.dir, "text.mjs"), await readFile(resolve("src/text.mjs")));
+    const sink = spawn(process.execPath, [runtime, dir, "nonce", "stream"], {
+      stdio: ["pipe", "ignore", "ignore"],
+    });
+    for (let i = 0; i < 100; i++) {
+      const metadata = JSON.parse(
+        await readFile(join(dir, "capture.json"), "utf8").catch(() => "{}"),
+      );
+      if (metadata.health === "ready") break;
+      await delay();
+    }
+    sink.stdin.write("marker\n");
+    let before = "";
+    for (let i = 0; i < 100 && !before; i++) {
+      before = await readFile(join(dir, "blocked"), "utf8").catch(() => "");
+      if (!before) await delay();
+    }
+    assert.ok(before);
+    const deadline = BigInt(before) + 200_000_000n;
+    let boundary: Awaited<ReturnType<typeof journalBoundary>> | undefined;
+    for (let i = 0; i < 100; i++) {
+      boundary = await journalBoundary(dir, "stream");
+      if (boundary.tail === 1 && boundary.publishedClock) break;
+      await delay();
+    }
+    assert.equal(boundary?.tail, 1);
+    assert.ok(boundary?.publishedClock && BigInt(boundary.publishedClock) > deadline);
+    sink.stdin.end();
+    assert.equal(await new Promise((resolve) => sink.on("close", resolve)), 0);
+  } finally {
     await rm(d.dir, { recursive: true, force: true });
   }
 });

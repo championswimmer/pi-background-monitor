@@ -58,9 +58,19 @@ test("journal reads committed frames in order and reports missing history", asyn
         data: data.toString("base64"),
       });
     };
+    const { TextNormalizer } = await import("../src/text.mjs");
+    const checkpoint = new TextNormalizer();
+    checkpoint.write(Buffer.from("old\n"));
     await writeFile(
       join(dir, "capture.json"),
-      JSON.stringify({ version: 1, stream: ref.stream, first: 2, tail: 3, health: "ready" }),
+      JSON.stringify({
+        version: 1,
+        stream: ref.stream,
+        first: 2,
+        tail: 3,
+        health: "ready",
+        firstText: checkpoint.snapshot(),
+      }),
       { mode: 0o600 },
     );
     await writeFile(
@@ -75,6 +85,17 @@ test("journal reads committed frames in order and reports missing history", asyn
     const next = await readJournal(dir, ref.stream, 2);
     assert.equal(next.gap, false);
     assert.equal(next.frames[0].data.toString(), "two\n");
+    const historical = new Manager(
+      "session",
+      () => undefined,
+      () => {},
+      root,
+    );
+    const tail = await historical.inspectHistorical(ref);
+    assert.equal(tail.untrustedOutput.text, "one\ntwo\n");
+    assert.equal(tail.gap, true);
+    assert.equal(tail.parserUncertain, false);
+    await historical.close();
     await rm(join(dir, "2.jsonl"));
     await symlink(join(dir, "capture.json"), join(dir, "2.jsonl"));
     await assert.rejects(readJournal(dir, ref.stream));
@@ -182,6 +203,297 @@ test("tail reads past 12,800 small frames and forward reads hold partial UTF-8",
     assert.equal(limited.untrustedOutput.truncated, true);
     await manager.close();
   } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("forward inspection preserves terminal-control state across pages", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "pbm-escape-page-"));
+  const root = join(parent, "state");
+  try {
+    const store = new LogStorage("session", root);
+    const { dir, ref } = await store.reserve();
+    const left = Buffer.from(`${"x".repeat(5460)}\x1b`),
+      right = Buffer.from("]0;SECRET\x07SAFE\n");
+    const encode = (sequence: number, start: number, data: Buffer) =>
+      JSON.stringify({
+        version: 1,
+        stream: ref.stream,
+        sequence,
+        start,
+        end: start + data.length,
+        kind: "output",
+        data: data.toString("base64"),
+      });
+    await writeFile(
+      join(dir, "1.jsonl"),
+      `${encode(1, 0, left)}\n${encode(2, left.length, right)}\n`,
+      { mode: 0o600 },
+    );
+    await writeFile(
+      join(dir, "capture.json"),
+      JSON.stringify({ version: 1, stream: ref.stream, first: 1, tail: 2, health: "complete" }),
+      { mode: 0o600 },
+    );
+    const manager = new Manager(
+      "session",
+      () => undefined,
+      () => {},
+      root,
+    );
+    const first = await manager.inspectHistorical(ref, { sequence: 0, offset: 0 });
+    const second = await manager.inspectHistorical(ref, first.next);
+    assert.equal(first.untrustedOutput.text, "x".repeat(5460));
+    assert.equal(second.untrustedOutput.text, "SAFE\n");
+    await manager.close();
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("inspection bounds CR-rendered lines and strips controls crossing a tail cut", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "pbm-tail-control-"));
+  const root = join(parent, "state");
+  try {
+    const store = new LogStorage("session", root);
+    const { dir, ref } = await store.reserve();
+    const manager = new Manager(
+      "session",
+      () => undefined,
+      () => {},
+      root,
+    );
+    const encode = (sequence: number, start: number, data: Buffer) =>
+      JSON.stringify({
+        version: 1,
+        stream: ref.stream,
+        sequence,
+        start,
+        end: start + data.length,
+        kind: "output",
+        data: data.toString("base64"),
+      });
+    const cr = Buffer.alloc(400, 13);
+    await writeFile(join(dir, "1.jsonl"), `${encode(1, 0, cr)}\n`, { mode: 0o600 });
+    await writeFile(
+      join(dir, "capture.json"),
+      JSON.stringify({ version: 1, stream: ref.stream, first: 1, tail: 1, health: "complete" }),
+      { mode: 0o600 },
+    );
+    const forward = await manager.inspectHistorical(ref, { sequence: 0, offset: 0 });
+    assert.ok(forward.untrustedOutput.text.split("\n").length <= 200);
+    assert.equal(forward.untrustedOutput.truncated, true);
+    const raw = Buffer.from(
+      `${"x".repeat(1000)}\x1b]${"a".repeat(3000)}SECRET\x07${"\x1b[31m".repeat(12600)}`,
+    );
+    const frames: string[] = [];
+    for (let start = 0, seq = 1; start < raw.length; start += 16384, seq++)
+      frames.push(encode(seq, start, raw.subarray(start, start + 16384)));
+    await writeFile(join(dir, "1.jsonl"), `${frames.join("\n")}\n`, { mode: 0o600 });
+    await writeFile(
+      join(dir, "capture.json"),
+      JSON.stringify({
+        version: 1,
+        stream: ref.stream,
+        first: 1,
+        tail: frames.length,
+        health: "complete",
+      }),
+      { mode: 0o600 },
+    );
+    const tail = await manager.inspectHistorical(ref);
+    assert.equal(tail.untrustedOutput.text.includes("SECRET"), false);
+    assert.equal(tail.untrustedOutput.truncated, true);
+    await manager.close();
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("rotated inspection restores its paired parser checkpoint and rejects races", async () => {
+  const { TextNormalizer } = await import("../src/text.mjs");
+  const parent = await mkdtemp(join(tmpdir(), "pbm-inspection-checkpoint-"));
+  const root = join(parent, "state");
+  try {
+    const store = new LogStorage("session", root);
+    const { dir, ref } = await store.reserve();
+    const parser = new TextNormalizer();
+    parser.write(Buffer.concat([Buffer.from("\x1b]hidden-"), Buffer.from([0xe2, 0x82])]));
+    const firstText = parser.snapshot();
+    const data = Buffer.concat([Buffer.from([0xac]), Buffer.from("SECRET\x07VISIBLE\n")]);
+    const frame = {
+      version: 1,
+      stream: ref.stream,
+      sequence: 2,
+      start: 10,
+      end: 10 + data.length,
+      kind: "output",
+      data: data.toString("base64"),
+    };
+    await writeFile(join(dir, "2.jsonl"), `${JSON.stringify(frame)}\n`, { mode: 0o600 });
+    const metadata = {
+      version: 1,
+      stream: ref.stream,
+      first: 2,
+      tail: 2,
+      health: "complete",
+      firstText,
+    };
+    await writeFile(join(dir, "capture.json"), JSON.stringify(metadata), { mode: 0o600 });
+    const manager = new Manager(
+      "session",
+      () => undefined,
+      () => {},
+      root,
+    );
+    const tail = await manager.inspectHistorical(ref);
+    assert.equal(tail.untrustedOutput.text, "VISIBLE\n");
+    const forward = await manager.inspectHistorical(ref, { sequence: 0, offset: 0 });
+    assert.equal(forward.untrustedOutput.text, "VISIBLE\n");
+    const original = (manager as any).normalizerAt.bind(manager);
+    (manager as any).normalizerAt = async (...args: unknown[]) => {
+      await writeFile(
+        join(dir, "capture.json"),
+        JSON.stringify({ ...metadata, first: 3, tail: 3 }),
+        { mode: 0o600 },
+      );
+      return original(...args);
+    };
+    await assert.rejects(manager.inspectHistorical(ref), /rotated during inspection/);
+    (manager as any).normalizerAt = original;
+    await writeFile(
+      join(dir, "capture.json"),
+      JSON.stringify({ ...metadata, firstText: undefined }),
+      { mode: 0o600 },
+    );
+    await assert.rejects(manager.inspectHistorical(ref), /checkpoint unavailable/);
+    await manager.close();
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("journal retries a rotation between metadata sampling and segment enumeration", async () => {
+  const fs = (await import("node:fs/promises")).default;
+  const { syncBuiltinESMExports } = await import("node:module");
+  const { TextNormalizer } = await import("../src/text.mjs");
+  const parent = await mkdtemp(join(tmpdir(), "pbm-rotation-race-"));
+  const root = join(parent, "state");
+  const original = fs.readdir;
+  try {
+    const store = new LogStorage("session", root);
+    const { dir, ref } = await store.reserve();
+    const parser = new TextNormalizer();
+    const firstText = parser.snapshot();
+    const encode = (sequence: number, start: number, text: string) => {
+      const data = Buffer.from(text);
+      return JSON.stringify({
+        version: 1,
+        stream: ref.stream,
+        sequence,
+        start,
+        end: start + data.length,
+        kind: "output",
+        data: data.toString("base64"),
+      });
+    };
+    await writeFile(join(dir, "1.jsonl"), `${encode(1, 0, "old\n")}\n`, { mode: 0o600 });
+    await writeFile(
+      join(dir, "capture.json"),
+      JSON.stringify({
+        version: 1,
+        stream: ref.stream,
+        first: 1,
+        tail: 1,
+        health: "ready",
+        firstText,
+      }),
+      { mode: 0o600 },
+    );
+    let rotated = false;
+    (fs as any).readdir = async (path: unknown, ...args: unknown[]) => {
+      if (path === dir && !rotated) {
+        rotated = true;
+        parser.write(Buffer.from("old\n"));
+        await writeFile(join(dir, "2.jsonl"), `${encode(2, 4, "new\n")}\n`, { mode: 0o600 });
+        await writeFile(
+          join(dir, "capture.json"),
+          JSON.stringify({
+            version: 1,
+            stream: ref.stream,
+            first: 2,
+            tail: 2,
+            health: "ready",
+            firstText: parser.snapshot(),
+          }),
+          { mode: 0o600 },
+        );
+        await rm(join(dir, "1.jsonl"));
+      }
+      return (original as any)(path, ...args);
+    };
+    syncBuiltinESMExports();
+    const page = await readJournal(dir, ref.stream, 0);
+    assert.equal(rotated, true);
+    assert.equal(page.first, 2);
+    assert.equal(page.gap, true);
+    assert.equal(page.frames[0].sequence, 2);
+    assert.deepEqual(page.firstText, parser.snapshot());
+  } finally {
+    (fs as any).readdir = original;
+    syncBuiltinESMExports();
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("deleting a listed segment entirely before the cursor is not a live gap", async () => {
+  const fs = (await import("node:fs/promises")).default;
+  const { syncBuiltinESMExports } = await import("node:module");
+  const parent = await mkdtemp(join(tmpdir(), "pbm-obsolete-segment-"));
+  const root = join(parent, "state");
+  const original = fs.readdir;
+  try {
+    const store = new LogStorage("session", root);
+    const { dir, ref } = await store.reserve();
+    const encode = (sequence: number, start: number, text: string) => {
+      const data = Buffer.from(text);
+      return JSON.stringify({
+        version: 1,
+        stream: ref.stream,
+        sequence,
+        start,
+        end: start + data.length,
+        kind: "output",
+        data: data.toString("base64"),
+      });
+    };
+    await writeFile(join(dir, "1.jsonl"), `${encode(1, 0, "a\n")}\n${encode(2, 2, "b\n")}\n`, {
+      mode: 0o600,
+    });
+    await writeFile(join(dir, "3.jsonl"), `${encode(3, 4, "c\n")}\n`, { mode: 0o600 });
+    await writeFile(
+      join(dir, "capture.json"),
+      JSON.stringify({ version: 1, stream: ref.stream, first: 1, tail: 3, health: "ready" }),
+      { mode: 0o600 },
+    );
+    let removed = false;
+    (fs as any).readdir = async (path: unknown, ...args: unknown[]) => {
+      const names = await (original as any)(path, ...args);
+      if (path === dir && !removed) {
+        removed = true;
+        await rm(join(dir, "1.jsonl"));
+      }
+      return names;
+    };
+    syncBuiltinESMExports();
+    const page = await readJournal(dir, ref.stream, 2);
+    assert.equal(removed, true);
+    assert.equal(page.gap, false);
+    assert.equal(page.next, 3);
+    assert.equal(page.frames[0].data.toString(), "c\n");
+  } finally {
+    (fs as any).readdir = original;
+    syncBuiltinESMExports();
     await rm(parent, { recursive: true, force: true });
   }
 });
