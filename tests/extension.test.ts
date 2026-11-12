@@ -86,6 +86,7 @@ test("watch wakes only on selected event, not routine output; shutdown detaches"
   const ctx: any = {
     cwd: process.cwd(),
     hasUI: false,
+    isIdle: () => true,
     sessionManager: { getSessionId: () => "test", getEntries: () => entries },
     ui: { notify: () => {} },
   };
@@ -133,6 +134,7 @@ test("exit watch reports a lost pane while another job remains alive", async () 
   const ctx: any = {
     cwd: process.cwd(),
     hasUI: false,
+    isIdle: () => true,
     sessionManager: { getSessionId: () => "lost-watch", getEntries: () => entries },
     ui: { notify: () => {} },
   };
@@ -186,6 +188,7 @@ function runtime(session: string, entries: any[] = []) {
   const ctx: any = {
     cwd: process.cwd(),
     hasUI: false,
+    isIdle: () => true,
     sessionManager: { getSessionId: () => session, getEntries: () => entries },
     ui: { notify: (text: string) => notices.push(text) },
   };
@@ -200,6 +203,12 @@ function runtime(session: string, entries: any[] = []) {
     command: (name: string, args: string) => commands.get(name).handler(args, ctx),
     start: () => events.get("session_start")({}, ctx),
     close: () => events.get("session_shutdown")({}, ctx),
+    messageEnd: (message: unknown) => events.get("message_end")({ message }, ctx),
+    beforeAgent: (messageType = "user") =>
+      events.get("before_agent_start")(
+        { messageType, systemPromptOptions: { selectedTools: [], sections: {} } },
+        ctx,
+      ),
     call: async (name: string, p: unknown) =>
       track((await tools.get(name).execute("call", p, undefined, undefined, ctx)).details),
   };
@@ -216,7 +225,7 @@ test("shared identities and subscriptions end with the live process binding", as
   try {
     assert.deepEqual(
       [...a.tools.keys()],
-      ["bgmon_start", "bgmon_inspect", "bgmon_control", "bgmon_watch"],
+      ["bgmon_start", "bgmon_inspect", "bgmon_control", "bgmon_watch", "bgmon_events"],
     );
     const job = await a.call("bgmon_start", {
       command: "sleep 2; echo SHARED_SECRET; sleep 30",
@@ -239,7 +248,14 @@ test("shared identities and subscriptions end with the live process binding", as
       pattern: "SHARED_SECRET",
       delivery: "nextTurn",
     });
-    assert.ok(watch1.id && watch2.id);
+    const watch3 = await c.call("bgmon_watch", {
+      action: "add",
+      monitorId: id,
+      kind: "contains",
+      pattern: "SHARED_SECRET",
+      delivery: "ui",
+    });
+    assert.ok(watch1.id && watch2.id && watch3.id);
     assert.match(
       (await c.call("bgmon_watch", { action: "remove", watchId: watch1.id })).error,
       /Unknown watch/,
@@ -256,12 +272,43 @@ test("shared identities and subscriptions end with the live process binding", as
     );
     await a.close();
     const deadline = Date.now() + 7000;
-    while ((!b.messages.length || !c.messages.length) && Date.now() < deadline)
+    while (
+      (!b.messages.length ||
+        (await c.call("bgmon_events", { action: "list" })).events.length < 2) &&
+      Date.now() < deadline
+    )
       await new Promise((r) => setTimeout(r, 50));
     assert.equal(b.messages.length, 1);
-    assert.equal(c.messages.length, 1);
+    assert.equal(c.messages.length, 0);
     assert.doesNotMatch(b.messages[0][0].content, /SHARED_SECRET/);
-    assert.deepEqual(c.messages[0][1], { deliverAs: "nextTurn" });
+    const nextMessage = c.beforeAgent("custom")?.message;
+    assert.ok(nextMessage);
+    assert.doesNotMatch(nextMessage.content, /SHARED_SECRET/);
+    const bEvents = await b.call("bgmon_events", { action: "list" });
+    const cEvents = await c.call("bgmon_events", { action: "list" });
+    assert.deepEqual(
+      bEvents.events.map((e: any) => e.watchId),
+      [watch1.id],
+    );
+    assert.deepEqual(
+      new Set(cEvents.events.map((e: any) => e.watchId)),
+      new Set([watch2.id, watch3.id]),
+    );
+    assert.equal(c.notices.length, 0); // UI-only events remain visible in headless sessions.
+    assert.doesNotMatch(JSON.stringify(cEvents), /SHARED_SECRET/);
+    assert.equal(bEvents.delivery.wake.inFlight, true);
+    c.messageEnd({ role: "custom", ...nextMessage });
+    assert.equal(
+      (await c.call("bgmon_events", { action: "list" })).delivery.nextTurn.inFlight,
+      false,
+    );
+    assert.equal((await b.call("bgmon_events", { action: "clear" })).cleared, 1);
+    assert.equal((await b.call("bgmon_events", { action: "list" })).delivery.wake.inFlight, true);
+    await b.start(); // Replacement starts empty even without an earlier shutdown callback.
+    b.messageEnd({ role: "custom", ...b.messages[0][0] });
+    assert.deepEqual((await b.call("bgmon_events", { action: "list" })).events, []);
+    assert.deepEqual(await b.call("bgmon_watch", { action: "list" }), []);
+    assert.equal((await c.call("bgmon_events", { action: "list" })).events.length, 2);
     assert.equal((await c.call("bgmon_inspect", { id })).state, "running");
     await b.close();
     await c.close();
@@ -352,11 +399,11 @@ test("Pi loader independently reloads extension factories using the same process
   assert.deepEqual(b.errors, []);
   assert.deepEqual(
     [...a.extensions[0].tools.keys()],
-    ["bgmon_start", "bgmon_inspect", "bgmon_control", "bgmon_watch"],
+    ["bgmon_start", "bgmon_inspect", "bgmon_control", "bgmon_watch", "bgmon_events"],
   );
   assert.deepEqual(
     [...b.extensions[0].tools.keys()],
-    ["bgmon_start", "bgmon_inspect", "bgmon_control", "bgmon_watch"],
+    ["bgmon_start", "bgmon_inspect", "bgmon_control", "bgmon_watch", "bgmon_events"],
   );
   assert.equal((globalThis as any)[key], before);
   function loadedRuntime(loaded: any, session: string) {
@@ -368,6 +415,7 @@ test("Pi loader independently reloads extension factories using the same process
     const ctx = {
       cwd: process.cwd(),
       hasUI: false,
+      isIdle: () => true,
       sessionManager: { getSessionId: () => session, getEntries: () => entries },
       ui: { notify: () => {} },
     };
@@ -421,7 +469,7 @@ test("Pi loader independently reloads extension factories using the same process
   }
 });
 
-test("last close racing a new session serializes lock release and recovery", async () => {
+test("last close racing a new session detaches control but preserves explicit log inspection", async () => {
   const a = runtime("race-owner");
   await a.start();
   const job = await a.call("bgmon_start", { command: "sleep 20" });
@@ -430,12 +478,14 @@ test("last close racing a new session serializes lock release and recovery", asy
   const b = runtime("race-owner", a.entries);
   await b.start();
   try {
-    const listing = await b.call("bgmon_inspect", {});
-    assert.ok(Array.isArray(listing), JSON.stringify(listing));
-    assert.ok(listing.some((j: any) => j.id === job.id));
+    assert.deepEqual(await b.call("bgmon_inspect", {}), []);
+    const history = await b.call("bgmon_inspect", { logRef: job.logRef });
+    assert.equal(history.state, "unknown");
+    assert.equal(history.logRef.stream, job.logRef.stream);
+    const panes = await checked(["-S", job.socket, "list-panes", "-a", "-F", "#{pane_id}"]);
+    assert.ok(panes.stdout.trim(), "detaching leaves the job running");
     await closing;
   } finally {
-    await b.call("bgmon_control", { action: "server_stop" });
     await b.close();
     await closing;
   }
@@ -596,7 +646,7 @@ test("bgmon interface validates action arguments and command routing", async () 
   try {
     assert.deepEqual(
       [...a.tools.keys()],
-      ["bgmon_start", "bgmon_inspect", "bgmon_control", "bgmon_watch"],
+      ["bgmon_start", "bgmon_inspect", "bgmon_control", "bgmon_watch", "bgmon_events"],
     );
     assert.deepEqual([...a.commands.keys()], ["bgmon"]);
     assert.deepEqual(Object.keys(a.tools.get("bgmon_start").parameters.properties), [
@@ -760,6 +810,8 @@ test("dashboard displays sanitized command and watch information and completes s
       assert.match(output.at(-1)!, /^╰─+╯$/);
       assert.ok(output.every((line: string) => visibleWidth(line) === 80));
       const narrow = component.render(30);
+      assert.match(output.join("\n"), /Events 0.*queued 0.*in flight 0/);
+      assert.match(narrow.join("\n"), /Events 0/);
       assert.match(narrow.at(-1), /^╰─+╯$/);
       assert.ok(narrow.every((line: string) => visibleWidth(line) === 30));
       component.handleInput("tui.select.cancel");
@@ -1215,15 +1267,39 @@ test("explicit historical deletion reclaims a verified dead detached pane", asyn
     await new Promise((resolve) => setTimeout(resolve, 800));
     const resumed = runtime("history-dead-pane", owner.entries);
     await resumed.start();
+    const { boundedIo, Tmux } = await import("../src/tmux.ts");
+    const original = Tmux.prototype.sourceOperation;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let reservations: Promise<unknown>[] = [];
+    Tmux.prototype.sourceOperation = async function (...args) {
+      await original.apply(this, args);
+      if (args[3] === "exited" && args[4] === "kill")
+        reservations = Array.from({ length: 16 }, () =>
+          boundedIo(() => gate, 20).catch(() => undefined),
+        );
+    };
     try {
       assert.deepEqual(await resumed.call("bgmon_inspect", {}), []);
       assert.equal((await resumed.call("bgmon_inspect", { logRef: job.logRef })).state, "unknown");
+      assert.ok(
+        (await resumed.call("bgmon_control", { action: "delete_history", logRef: job.logRef }))
+          .error,
+      );
+      release();
+      await Promise.all(reservations);
+      await new Promise((resolve) => setImmediate(resolve));
       assert.equal(
         (await resumed.call("bgmon_control", { action: "delete_history", logRef: job.logRef }))
           .deleted,
         true,
       );
     } finally {
+      release();
+      Tmux.prototype.sourceOperation = original;
+      await Promise.all(reservations);
       await resumed.close();
     }
   } finally {
@@ -1794,7 +1870,7 @@ test("stalled removed watches obey per-owner and global IO bounds", async () => 
           continue;
         }
         assert.ok(watch.id);
-        await (broker as any).tick();
+        await (broker as any).current.tick();
         await Promise.resolve();
         assert.equal(
           (await owner.call("bgmon_watch", { action: "remove", watchId: watch.id })).removed,
@@ -1826,11 +1902,11 @@ test("stalled removed watches obey per-owner and global IO bounds", async () => 
       }
     }
     assert.equal(calls, 16);
-    assert.equal((broker as any).ioInFlight, 16);
+    assert.equal((broker as any).physical.ioInFlight, 16);
   } finally {
     Manager.prototype.watchRead = original;
     release();
-    for (let i = 0; i < 100 && (broker as any).ioInFlight; i++)
+    for (let i = 0; i < 100 && (broker as any).physical.ioInFlight; i++)
       await new Promise((resolve) => setTimeout(resolve, 20));
     for (const owner of owners) await owner.call("bgmon_control", { action: "server_stop" });
     for (const owner of owners) await owner.close();
@@ -2346,5 +2422,383 @@ test("post-deadline clean EOF cannot reuse an earlier output proof", async () =>
     Manager.prototype.watchBoundary = original;
     await a.call("bgmon_control", { action: "server_stop" });
     await a.close();
+  }
+});
+
+test("removing a repeating watch flushes pending hits with their match positions", async () => {
+  const a = runtime("remove-pending-hits");
+  await a.start();
+  try {
+    const job = await a.call("bgmon_start", {
+      command: "sleep 1; echo MATCH; sleep 1; echo MATCH; sleep 20",
+    });
+    const watch = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "contains",
+      pattern: "MATCH",
+      once: false,
+    });
+    const deadline = Date.now() + 6000;
+    let info: any;
+    do {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      info = (await a.call("bgmon_watch", { action: "list" })).find((w: any) => w.id === watch.id);
+    } while (info.hits < 2 && Date.now() < deadline);
+    assert.equal(info.hits, 2);
+    assert.equal(
+      (await a.call("bgmon_watch", { action: "remove", watchId: watch.id })).removed,
+      true,
+    );
+    const events = (await a.call("bgmon_events", { action: "list" })).events.filter(
+      (e: any) => e.watchId === watch.id && e.event === "matched",
+    );
+    assert.equal(
+      events.reduce((n: number, e: any) => n + e.count, 0),
+      2,
+    );
+    for (const e of events) {
+      assert.ok(e.lastPosition.sequence > 0);
+      assert.ok(e.lastPosition.normalizedOffsetUtf16 > 0);
+      assert.equal(e.cursor, e.lastPosition.sequence);
+    }
+  } finally {
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
+
+test("session shutdown invalidates binding before a stalled broker queue settles", async () => {
+  const { broker } = await import("../src/broker.ts");
+  const a = runtime("bounded-shutdown");
+  await a.start();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const previous = (broker as any).current;
+  await previous.pending;
+  previous.pending = gate;
+  try {
+    const start = performance.now();
+    await a.close();
+    assert.ok(performance.now() - start < 2500);
+    assert.match((await a.call("bgmon_events", { action: "list" })).error, /No active/);
+  } finally {
+    release();
+    await previous.pending;
+  }
+});
+
+test("stalled old broker mutations do not block or erase a fresh generation", async () => {
+  const { broker } = await import("../src/broker.ts");
+  const { Manager } = await import("../src/manager.ts");
+  const a = runtime("generation-old"),
+    b = runtime("generation-new");
+  await a.start();
+  const job = await a.call("bgmon_start", { command: "sleep 20" });
+  assert.ok(job.id);
+  let release!: () => void, entered!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const waiting = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const original = Manager.prototype.jobs;
+  Manager.prototype.jobs = async function () {
+    if (this.session === "generation-old") {
+      entered();
+      await gate;
+    }
+    return original.call(this);
+  };
+  const previous = (broker as any).current;
+  try {
+    const blocked = a.call("bgmon_inspect", {});
+    await waiting;
+    assert.equal(previous.physical.mutations, 1);
+    await a.close();
+    await b.start();
+    assert.equal((broker as any).current.physical, previous.physical);
+    const starting = b.call("bgmon_start", { command: "sleep 20" });
+    const fresh = await Promise.race([
+      starting,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("new generation blocked")), 4000),
+      ),
+    ]);
+    assert.ok(fresh.id);
+    assert.equal(previous.physical.mutations, 1, "the old physical operation remains charged");
+    release();
+    await blocked;
+    await previous.pending;
+    assert.deepEqual(
+      (await b.call("bgmon_inspect", {})).map((j: any) => j.id),
+      [fresh.id],
+    );
+    assert.match((await b.call("bgmon_inspect", { id: job.id })).error, /Unknown monitor/);
+    await b.call("bgmon_control", { action: "server_stop" });
+  } finally {
+    release();
+    Manager.prototype.jobs = original;
+    await b.close();
+  }
+});
+
+test("shutdown during startup cannot launch an unreferenced command", async () => {
+  const { LogStorage } = await import("../src/storage.ts");
+  const { Tmux } = await import("../src/tmux.ts");
+  const { stat } = await import("node:fs/promises");
+  for (const point of ["reserve", "gate"] as const) {
+    const a = runtime(`startup-detach-${point}`);
+    await a.start();
+    const marker = join(testStateHome, `ran-${point}`);
+    const originalReserve = LogStorage.prototype.reserve;
+    const originalStatus = Tmux.prototype.sourceStatus;
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    if (point === "reserve")
+      LogStorage.prototype.reserve = async function (...args) {
+        const result = await originalReserve.apply(this, args);
+        entered();
+        await gate;
+        return result;
+      };
+    else
+      Tmux.prototype.sourceStatus = async function (...args) {
+        const result = await originalStatus.apply(this, args);
+        entered();
+        await gate;
+        return result;
+      };
+    try {
+      const starting = a.call("bgmon_start", { command: `touch '${marker}'` });
+      await waiting;
+      await a.close();
+      release();
+      const result = await starting;
+      assert.match(result.error, /Session closed/);
+      assert.equal(
+        await stat(marker).then(
+          () => true,
+          () => false,
+        ),
+        false,
+      );
+      if (point === "reserve")
+        assert.equal(
+          a.entries.some((e: any) => e.customType === "pi-background-monitor:logref:v2"),
+          false,
+        );
+    } finally {
+      release();
+      LogStorage.prototype.reserve = originalReserve;
+      Tmux.prototype.sourceStatus = originalStatus;
+      await a.close();
+    }
+  }
+});
+
+test("settled watch initialization releases physical capacity before queued installation", async () => {
+  const { broker } = await import("../src/broker.ts");
+  const { Manager } = await import("../src/manager.ts");
+  const a = runtime("settled-init"),
+    b = runtime("settled-init");
+  await a.start();
+  const job = await a.call("bgmon_start", { command: "sleep 20" });
+  const original = Manager.prototype.watchStart;
+  let releaseReads!: () => void, entered!: () => void, releaseQueue!: () => void;
+  const reads = new Promise<void>((resolve) => {
+    releaseReads = resolve;
+  });
+  const queue = new Promise<void>((resolve) => {
+    releaseQueue = resolve;
+  });
+  const waiting = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  let count = 0;
+  Manager.prototype.watchStart = async function (...args) {
+    const result = await original.apply(this, args);
+    if (this.session === "settled-init") {
+      if (++count === 4) entered();
+      await reads;
+    }
+    return result;
+  };
+  const old = (broker as any).current;
+  try {
+    const watches = Array.from({ length: 4 }, () =>
+      a.call("bgmon_watch", { action: "add", monitorId: job.id, kind: "any" }),
+    );
+    await waiting;
+    await old.pending;
+    old.pending = queue;
+    releaseReads();
+    for (
+      let i = 0;
+      i < 50 && [...old.physical.initializing.values()].some((x: any) => !x.settled);
+      i++
+    )
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal([...old.physical.initializing.values()].filter((x: any) => x.settled).length, 4);
+    await a.close();
+    await b.start();
+    Manager.prototype.watchStart = original;
+    const fresh = await b.call("bgmon_start", { command: "sleep 20" });
+    const watch = await b.call("bgmon_watch", { action: "add", monitorId: fresh.id, kind: "any" });
+    assert.ok(watch.id, JSON.stringify(watch));
+    releaseQueue();
+    for (const result of await Promise.all(watches)) assert.match(result.error, /changed|closed/);
+    await b.call("bgmon_control", { action: "server_stop" });
+  } finally {
+    releaseReads();
+    releaseQueue();
+    Manager.prototype.watchStart = original;
+    await b.close();
+  }
+});
+
+test("an unresolved release stays supervised and charged across binding shutdown", async () => {
+  const { Tmux } = await import("../src/tmux.ts");
+  const { broker } = await import("../src/broker.ts");
+  const a = runtime("release-uncertain");
+  await a.start();
+  let release!: () => void, entered!: () => void, tm!: InstanceType<typeof Tmux>;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const waiting = new Promise<void>((resolve) => {
+    entered = resolve;
+  });
+  const original = Tmux.prototype.releaseCaptureGate;
+  Tmux.prototype.releaseCaptureGate = async function (path) {
+    tm = this;
+    entered();
+    await gate;
+    return original.call(this, path);
+  };
+  const previous = (broker as any).current;
+  try {
+    const starting = a.call("bgmon_start", { command: "sleep 20" });
+    await waiting;
+    assert.equal((tm as any).pendingReleases.size, 1);
+    await a.close();
+    assert.equal((tm as any).captureTimers.size, 1);
+    assert.equal(previous.physical.mutations, 1);
+    release();
+    const result = await starting;
+    assert.ok(result.id, JSON.stringify(result));
+    assert.equal((tm as any).pendingReleases.size, 0);
+    assert.equal((tm as any).captureTimers.size, 0);
+    assert.ok(["confirmed", "unknown"].includes(result.launch));
+  } finally {
+    release();
+    Tmux.prototype.releaseCaptureGate = original;
+    await a.close();
+  }
+});
+
+test("stale stop and server-stop cannot control jobs after their binding closes", async () => {
+  const { Manager } = await import("../src/manager.ts");
+  for (const action of ["stop", "server_stop"] as const) {
+    const a = runtime(`stale-control-${action}`),
+      b = runtime(`observer-${action}`);
+    await a.start();
+    await b.start();
+    const job = await a.call("bgmon_start", { command: "sleep 20" });
+    const original = (Manager.prototype as any).status;
+    let release!: () => void,
+      entered!: () => void,
+      blocked = false;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    (Manager.prototype as any).status = async function (...args: unknown[]) {
+      const result = await original.apply(this, args);
+      if (this.session === `stale-control-${action}` && !blocked) {
+        blocked = true;
+        entered();
+        await gate;
+      }
+      return result;
+    };
+    try {
+      const operation = a.call("bgmon_control", { action, id: job.id });
+      await waiting;
+      await a.close();
+      release();
+      assert.match((await operation).error, /Session closed/);
+      assert.equal((await b.call("bgmon_inspect", { id: job.id })).state, "running");
+      await b.call("bgmon_control", { action: "server_stop", id: job.id });
+    } finally {
+      release();
+      (Manager.prototype as any).status = original;
+      await a.close();
+      await b.close();
+    }
+  }
+});
+
+test("closed bindings cannot forget or delete history after storage verification stalls", async () => {
+  const { LogStorage } = await import("../src/storage.ts");
+  for (const action of ["forget", "delete_history"] as const) {
+    const a = runtime(`stale-delete-${action}`),
+      observer = runtime(`delete-observer-${action}`);
+    await a.start();
+    await observer.start();
+    const job = await a.call("bgmon_start", { command: "sleep 20" });
+    await a.call("bgmon_control", { action: "server_stop" });
+    if (action === "delete_history") {
+      await a.close();
+      await observer.close();
+      await a.start();
+      await observer.start();
+    }
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const waiting = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const original = LogStorage.prototype.remove;
+    LogStorage.prototype.remove = async function (...args) {
+      entered();
+      await gate;
+      return original.apply(this, args);
+    };
+    try {
+      const operation = a.call(
+        "bgmon_control",
+        action === "forget" ? { action, id: job.id } : { action, logRef: job.logRef },
+      );
+      await waiting;
+      await a.close();
+      release();
+      assert.match((await operation).error, /Session closed/);
+      const reopened = runtime(`stale-delete-${action}`, a.entries);
+      await reopened.start();
+      try {
+        const history = await reopened.call("bgmon_inspect", { logRef: job.logRef });
+        assert.equal(history.logRef.stream, job.logRef.stream);
+      } finally {
+        await reopened.close();
+      }
+    } finally {
+      release();
+      LogStorage.prototype.remove = original;
+      await a.close();
+      await observer.close();
+    }
   }
 });

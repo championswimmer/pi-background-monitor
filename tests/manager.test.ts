@@ -346,3 +346,134 @@ test("a missing private socket does not claim the owned server stopped", async (
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
+
+test("server-stop retains retryable proof evidence for every affected job", async () => {
+  const { boundedIo } = await import("../src/tmux.ts");
+  const root = await mkdtemp(join(tmpdir(), "pbm-proof-retry-"));
+  const m = new Manager(
+    "proof-retry",
+    () => undefined,
+    () => {},
+    join(root, "state"),
+  );
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let reservations: Promise<unknown>[] = [];
+  try {
+    const first = await m.run(() => m.start("sleep 20", process.cwd()));
+    const second = await m.run(() => m.start("sleep 20", process.cwd()));
+    reservations = Array.from({ length: 16 }, () =>
+      boundedIo(() => gate, 20).catch(() => undefined),
+    );
+    await Promise.all(reservations);
+    const stopped = await m.run(() => m.serverStop());
+    assert.equal(stopped.stopped, true);
+    assert.equal(stopped.proofIncomplete, 2);
+    release();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal((await m.run(() => m.forget(first.id))).forgotten, first.id);
+    await m.close();
+    const historical = new Manager(
+      "proof-retry",
+      () => undefined,
+      () => {},
+      join(root, "state"),
+    );
+    try {
+      assert.equal((await historical.inspectHistorical(second.logRef)).proofIncomplete, true);
+      assert.equal((await historical.deleteHistorical(second.logRef)).deleted, true);
+    } finally {
+      await historical.close();
+    }
+  } finally {
+    release();
+    await Promise.all(reservations);
+    await m.run(() => m.serverStop()).catch(() => {});
+    await m.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("supervisor retains exit evidence when proof publication is saturated", async () => {
+  const { boundedIo, Tmux } = await import("../src/tmux.ts");
+  const root = await mkdtemp(join(tmpdir(), "pbm-proof-supervisor-"));
+  const m = new Manager(
+    "proof-supervisor",
+    () => undefined,
+    () => {},
+    join(root, "state"),
+  );
+  const original = Tmux.prototype.sourceOperation;
+  let release!: () => void,
+    saturated = false;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let reservations: Promise<unknown>[] = [];
+  Tmux.prototype.sourceOperation = async function (...args) {
+    await original.apply(this, args);
+    if (!saturated && args[3] === "exited" && args[4] === "kill") {
+      saturated = true;
+      reservations = Array.from({ length: 16 }, () =>
+        boundedIo(() => gate, 20).catch(() => undefined),
+      );
+    }
+  };
+  try {
+    const job = await m.run(() => m.start("sleep 0.4; exit 0", process.cwd()));
+    let info: any = {};
+    for (let i = 0; i < 150 && !info.proofIncomplete; i++) {
+      await delay();
+      info = await m.run(() => m.inspect(job.id));
+    }
+    assert.equal(info.proofIncomplete, true);
+    release();
+    await Promise.all(reservations);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal((await m.run(() => m.forget(job.id))).forgotten, job.id);
+  } finally {
+    release();
+    Tmux.prototype.sourceOperation = original;
+    await Promise.all(reservations);
+    await m.run(() => m.serverStop()).catch(() => {});
+    await m.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a stalled launch acknowledgement returns unknown without replacement stats", async () => {
+  const { Tmux } = await import("../src/tmux.ts");
+  const root = await mkdtemp(join(tmpdir(), "pbm-ack-timeout-"));
+  const m = new Manager(
+    "ack-timeout",
+    () => undefined,
+    () => {},
+    join(root, "state"),
+  );
+  const original = Tmux.prototype.launchMarker;
+  let release!: () => void,
+    calls = 0;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  Tmux.prototype.launchMarker = async function (path) {
+    calls++;
+    await gate;
+    return original.call(this, path);
+  };
+  try {
+    const job = await m.run(() => m.start("sleep 20", process.cwd()));
+    assert.equal(job.launch, "unknown");
+    assert.equal(calls, 1);
+    release();
+    await m.run(() => m.serverStop());
+  } finally {
+    release();
+    Tmux.prototype.launchMarker = original;
+    await m.run(() => m.serverStop()).catch(() => {});
+    await m.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

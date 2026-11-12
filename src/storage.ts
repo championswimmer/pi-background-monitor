@@ -117,8 +117,10 @@ export class LogStorage {
     }
     return dir;
   }
-  async remove(ref: LogRef) {
+  async remove(ref: LogRef, active = () => true) {
     const dir = await this.resolve(ref);
+    if (!active()) throw new Error("Session closed before log deletion");
+    // Once removal begins, finish both directory and reservation cleanup.
     await rm(dir, { recursive: true });
     await rm(join(this.root, "slots", String(ref.slot)), { recursive: true });
     await rmdir(join(this.root, "owners", ref.owner)).catch(() => {});

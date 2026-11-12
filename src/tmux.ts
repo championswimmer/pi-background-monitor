@@ -3,7 +3,12 @@ import { randomBytes } from "node:crypto";
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { quote } from "./output.ts";
-import { type StopProof, writeStopProof } from "./proof.ts";
+import {
+  clearStopEvidence,
+  rememberStopEvidence,
+  type StopProof,
+  writeStopEvidence,
+} from "./proof.ts";
 
 export type ClientResult = { code: number; stdout: string; stderr: string; truncated: boolean };
 /** Drain both pipes even after reaching limits; never terminate the server for excess output. */
@@ -86,6 +91,27 @@ export async function createDirectory(): Promise<{ dir: string; socket: string; 
   );
   return { dir, socket, token };
 }
+const ioKey = Symbol.for("pi-background-monitor:timed-io:v1");
+const shared = globalThis as typeof globalThis & { [ioKey: symbol]: unknown };
+if (!shared[ioKey]) shared[ioKey] = { active: 0 };
+const timedIo = shared[ioKey] as { active: number };
+export class IoCapacityError extends Error {
+  constructor() {
+    super("Timed IO capacity exhausted");
+  }
+}
+/** Timed filesystem work remains charged until its uncancellable promise settles. */
+export async function boundedIo<T>(fn: () => Promise<T>, timeout: number): Promise<T> {
+  if (timedIo.active >= 16) throw new IoCapacityError();
+  timedIo.active++;
+  const operation = Promise.resolve().then(fn);
+  void operation
+    .finally(() => {
+      timedIo.active--;
+    })
+    .catch(() => {});
+  return withTimeout(operation, timeout);
+}
 export async function withTimeout<T>(operation: Promise<T>, timeout: number): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
@@ -105,6 +131,8 @@ export async function withTimeout<T>(operation: Promise<T>, timeout: number): Pr
 export class Tmux {
   private captureTimers = new Map<string, { timer: NodeJS.Timeout; cancelled: boolean }>();
   private captureResults = new Map<string, object>();
+  private pendingReleases = new Set<string>();
+  private detached = false;
   constructor(
     readonly socket: string,
     readonly dir: string,
@@ -160,6 +188,9 @@ export class Tmux {
   async releaseCaptureGate(path: string) {
     await writeFile(path, "", { mode: 0o600, flag: "wx" });
   }
+  async launchMarker(path: string) {
+    return stat(path);
+  }
   private async cleanupGate(gate: string, knownPane?: string) {
     if (!(await this.verify().catch(() => false))) return;
     const listing = knownPane
@@ -192,6 +223,7 @@ export class Tmux {
     runtime: string,
     stream?: string,
     onPane?: (pane: string, pid: number) => Promise<void>,
+    canRelease?: () => boolean,
   ) {
     const nonce = randomBytes(24).toString("hex");
     const gate = join(this.dir, `${nonce}.gate`);
@@ -232,8 +264,8 @@ export class Tmux {
       );
       let ready = false;
       while (Date.now() < deadline) {
-        const metadata = await withTimeout(
-          readFile(join(captureDir, "capture.json"), "utf8"),
+        const metadata = await boundedIo(
+          () => readFile(join(captureDir, "capture.json"), "utf8"),
           remaining(),
         ).catch(() => "");
         if (metadata) {
@@ -266,19 +298,29 @@ export class Tmux {
       if (!ready || Date.now() >= deadline || gateStatus.state !== "running")
         throw new Error("Capture sink or launcher did not become ready in time");
       this.superviseCapture(pane, captureDir, nonce, stream ?? nonce, pid);
+      if (canRelease && !canRelease()) throw new Error("Session closed during startup");
       // Creating the release file may become visible even if the write rejects.
       released = true;
-      await this.releaseCaptureGate(release);
+      this.pendingReleases.add(pane);
+      try {
+        await this.releaseCaptureGate(release);
+      } finally {
+        this.pendingReleases.delete(pane);
+        if (this.detached) this.stopCaptureSupervisor(pane);
+      }
       const ackDeadline = Date.now() + 5000;
       while (Date.now() < ackDeadline) {
-        if (
-          await withTimeout(stat(launched), Math.min(200, ackDeadline - Date.now())).then(
-            () => true,
-            () => false,
-          )
-        ) {
+        try {
+          await boundedIo(
+            () => this.launchMarker(launched),
+            Math.min(200, ackDeadline - Date.now()),
+          );
           acknowledged = true;
           break;
+        } catch (error) {
+          // Missing marker may appear later; a timeout or admission failure can
+          // still be running physically and must not spawn replacement stats.
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") break;
         }
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
@@ -311,7 +353,11 @@ export class Tmux {
     this.captureTimers.delete(pane);
   }
   stopCaptureSupervisors() {
-    for (const pane of this.captureTimers.keys()) this.stopCaptureSupervisor(pane);
+    this.detached = true;
+    // A submitted release write may already have launched the job. Keep only
+    // those supervisors until the actual write settles, without killing it.
+    for (const pane of this.captureTimers.keys())
+      if (!this.pendingReleases.has(pane)) this.stopCaptureSupervisor(pane);
   }
   cancelCaptureSupervisor(pane: string) {
     this.stopCaptureSupervisor(pane);
@@ -332,20 +378,36 @@ export class Tmux {
     let busy = false;
     let finished = false;
     let knownExit: { state: "exited"; exitCode?: number; signal?: string } | undefined;
+    let pendingProof: StopProof | undefined;
     const control = { timer: undefined as unknown as NodeJS.Timeout, cancelled: false };
     const finish = () => {
       clearInterval(control.timer);
       finished = true;
     };
     const finalize = (result: object) => {
-      if (!control.cancelled) this.captureResults.set(dir, result);
+      if (!control.cancelled)
+        this.captureResults.set(dir, {
+          ...result,
+          ...(pendingProof ? { pendingProof, proofIncomplete: true } : {}),
+        });
     };
-    const prove = (state: StopProof["state"], status?: { exitCode?: number; signal?: string }) =>
-      withTimeout(writeStopProof(dir, { version: 1, stream, state, ...status }), 1000).catch(
-        () => {},
-      );
+    const prove = async (
+      state: StopProof["state"],
+      status?: { exitCode?: number; signal?: string },
+    ) => {
+      const proof: StopProof = { version: 1, stream, state, ...status };
+      pendingProof = proof;
+      try {
+        const evidence = rememberStopEvidence(dir, proof, true);
+        await boundedIo(() => writeStopEvidence(dir, evidence), 1000);
+        clearStopEvidence(dir, evidence);
+        pendingProof = undefined;
+      } catch {
+        /* Retain evidence for an explicit retry while this controller lives. */
+      }
+    };
     const readState = async (timeout = 5000) =>
-      JSON.parse(await withTimeout(readFile(join(dir, "capture.json"), "utf8"), timeout));
+      JSON.parse(await boundedIo(() => readFile(join(dir, "capture.json"), "utf8"), timeout));
     const tick = async () => {
       if (busy) return;
       busy = true;
@@ -369,7 +431,7 @@ export class Tmux {
           const pipe = await checked(
             this.args("display-message", "-p", "-t", pane, "#{pane_pipe}"),
           );
-          const heartbeat = await withTimeout(stat(join(dir, "heartbeat")), 5000);
+          const heartbeat = await boundedIo(() => stat(join(dir, "heartbeat")), 5000);
           if (
             state.health !== "ready" ||
             pipe.stdout.trim() !== "1" ||
@@ -410,6 +472,10 @@ export class Tmux {
         }
         await finalize({ ...status, capture: health === "complete" ? "complete" : "incomplete" });
       } catch (error) {
+        if (error instanceof IoCapacityError) {
+          await finalize({ state: "capture_unverified", capture: "unknown", error: error.message });
+          return;
+        }
         let killed = stopped;
         if (!killed && !control.cancelled) {
           try {
@@ -499,9 +565,11 @@ export class Tmux {
     pid: number,
     expected: "running" | "exited" | "either",
     operation: "kill" | "interrupt",
+    active = () => true,
   ) {
     const condition = this.sourceCondition(pane, stream, pid, expected);
     if (!(await this.verify())) throw new Error("Producer server unavailable");
+    if (!active()) throw new Error("Session closed before producer control");
     const action = operation === "kill" ? `kill-pane -t ${pane}` : `send-keys -t ${pane} C-c`;
     const result = await checked(
       this.args(

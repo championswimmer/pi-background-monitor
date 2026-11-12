@@ -37,3 +37,30 @@ test("private server retains fast exit and asynchronous jobs", async () => {
     await rm(d.dir, { recursive: true, force: true });
   }
 });
+
+test("timed filesystem admission holds slots until underlying operations settle", async () => {
+  const { boundedIo } = await import("../src/tmux.ts");
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const operations = Array.from({ length: 16 }, () =>
+    boundedIo(() => gate, 10).catch(() => undefined),
+  );
+  try {
+    await Promise.all(operations);
+    let launched = false;
+    await assert.rejects(
+      boundedIo(async () => {
+        launched = true;
+      }, 100),
+      /capacity exhausted/,
+    );
+    assert.equal(launched, false);
+  } finally {
+    release();
+    await gate;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(await boundedIo(async () => "ok", 100), "ok");
+});

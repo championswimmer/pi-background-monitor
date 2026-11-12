@@ -11,10 +11,18 @@ import {
 } from "./journal.ts";
 import { MAX_MONITORS } from "./limits.ts";
 import { bounded, quote, sanitize } from "./output.ts";
-import { readStopProof, writeStopProof } from "./proof.ts";
+import {
+  clearStopEvidence,
+  getStopEvidence,
+  readStopProof,
+  rememberStopEvidence,
+  type StopProof,
+  writeStopEvidence,
+  writeStopProof,
+} from "./proof.ts";
 import { type LogRef, LogStorage } from "./storage.ts";
 import { TextNormalizer } from "./text.mjs";
-import { checked, createDirectory, probe, Tmux, withTimeout } from "./tmux.ts";
+import { boundedIo, checked, createDirectory, probe, Tmux } from "./tmux.ts";
 
 type Job = {
   id: string;
@@ -28,8 +36,15 @@ type Job = {
   cancelled?: boolean;
   failure?: string;
   final?: Status;
+  pendingProof?: StopProof;
 };
-type Status = { state: string; exitCode?: number; signal?: string; capture?: string };
+type Status = {
+  state: string;
+  exitCode?: number;
+  signal?: string;
+  capture?: string;
+  proofIncomplete?: boolean;
+};
 export type LogCursor = { sequence: number; offset: number };
 const id = () => randomBytes(12).toString("hex");
 function completeUtf8Prefix(data: Buffer, end: number) {
@@ -77,8 +92,8 @@ export class Manager {
   }
   async close() {
     this.closed = true;
-    await this.pending;
     this.tm?.stopCaptureSupervisors();
+    await this.pending;
   }
   private async ensureTmux() {
     if (!this.tm) {
@@ -118,7 +133,17 @@ export class Manager {
       return { state: "capture_unverified", capture: "unknown" };
     }
   }
-  async start(command: string, cwd: string, requestedId?: string) {
+  async start(
+    command: string,
+    cwd: string,
+    requestedId?: string,
+    active = () => true,
+    persist = this.persist,
+  ) {
+    const checkActive = () => {
+      if (this.closed || !active()) throw new Error("Session closed during startup");
+    };
+    checkActive();
     if (requestedId !== undefined && !validId(requestedId)) throw new Error("Invalid job ID");
     if (typeof command !== "string" || !command.trim() || Buffer.byteLength(command) > 65536)
       throw new Error("Command must be 1–65536 bytes");
@@ -151,7 +176,8 @@ export class Manager {
       const runtime = join(dir, `capture-${hash}.mjs`);
       await writeFile(runtime, source, { mode: 0o600, flag: "wx" });
       await writeFile(join(dir, "text.mjs"), textSource, { mode: 0o600, flag: "wx" });
-      this.persist(ref);
+      checkActive();
+      persist(ref);
       this.jobsById.set(job.id, job);
       const first = !(await this.verified());
       if (first && this.generation > 0) {
@@ -188,6 +214,7 @@ export class Manager {
             { mode: 0o600, flag: "wx" },
           );
         },
+        () => !this.closed && active(),
       );
       job.pane = start.pane;
       return {
@@ -229,14 +256,10 @@ export class Manager {
     }
   }
   async jobs() {
-    return Promise.all(
-      [...this.jobsById.values()].map(async (j) => ({
-        id: j.id,
-        created: j.created,
-        command: j.command,
-        ...(await this.status(j)),
-      })),
-    );
+    const jobs = [];
+    for (const j of this.jobsById.values())
+      jobs.push({ id: j.id, created: j.created, command: j.command, ...(await this.status(j)) });
+    return jobs;
   }
   private async read(ref: LogRef) {
     const dir = await this.storage.resolve(ref);
@@ -489,16 +512,30 @@ export class Manager {
   async inspectHistorical(ref: LogRef, after?: LogCursor) {
     const dir = await this.storage.resolve(ref);
     const proof = await readStopProof(dir, ref.stream).catch(() => undefined);
+    const pending = !!getStopEvidence(dir)?.confirmed;
     return {
       historical: true,
-      state: proof?.state ?? "unknown",
-      ...(proof?.exitCode !== undefined ? { exitCode: proof.exitCode } : {}),
-      ...(proof?.signal ? { signal: proof.signal } : {}),
+      state: pending ? "unknown" : (proof?.state ?? "unknown"),
+      proofIncomplete: pending,
+      ...(!pending && proof?.exitCode !== undefined ? { exitCode: proof.exitCode } : {}),
+      ...(!pending && proof?.signal ? { signal: proof.signal } : {}),
       ...(after ? await this.readForward(ref, after) : await this.read(ref)),
       logRef: ref,
     };
   }
-  async stop(jobId: string) {
+  private async publishProof(job: Job, proof: StopProof) {
+    job.pendingProof = proof;
+    try {
+      const evidence = rememberStopEvidence(job.dir, proof, true);
+      await boundedIo(() => writeStopEvidence(job.dir, evidence), 1000);
+      clearStopEvidence(job.dir, evidence);
+      if (job.pendingProof === proof) job.pendingProof = undefined;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  async stop(jobId: string, active = () => true) {
     const job = this.find(jobId);
     const tm = this.tm;
     const current = await this.status(job);
@@ -512,14 +549,14 @@ export class Manager {
       !(await this.verified())
     )
       throw new Error("Cannot verify producer before stopping");
-    await tm.sourceOperation(job.pane, job.ref.stream, job.pid, "running", "interrupt");
+    await tm.sourceOperation(job.pane, job.ref.stream, job.pid, "running", "interrupt", active);
     await new Promise((r) => setTimeout(r, 2000));
     const observed = await tm
       .sourceStatus(job.pane, job.ref.stream, job.pid)
       .catch(() => undefined);
     let confirmed = false;
     if (observed?.state === "running" || observed?.state === "exited") {
-      await tm.sourceOperation(job.pane, job.ref.stream, job.pid, observed.state, "kill");
+      await tm.sourceOperation(job.pane, job.ref.stream, job.pid, observed.state, "kill", active);
       confirmed = true;
       tm.cancelCaptureSupervisor(job.pane);
     } else if (observed?.state === "changed") {
@@ -536,19 +573,14 @@ export class Manager {
       };
     job.cancelled = true;
     job.final = { state: "cancelled", capture: "draining" };
-    const written = await withTimeout(
-      writeStopProof(job.dir, {
-        version: 1,
-        stream: job.ref.stream,
-        state: "cancelled",
-        exitCode: observed?.state === "exited" ? observed.exitCode : prior?.exitCode,
-        signal: observed?.state === "exited" ? observed.signal : prior?.signal,
-      }),
-      1000,
-    ).then(
-      () => true,
-      () => false,
-    );
+    const written = await this.publishProof(job, {
+      version: 1,
+      stream: job.ref.stream,
+      state: "cancelled",
+      exitCode: observed?.state === "exited" ? observed.exitCode : prior?.exitCode,
+      signal: observed?.state === "exited" ? observed.signal : prior?.signal,
+    });
+    job.final.proofIncomplete = !written;
     job.final.capture = await this.drainCapture(job, Date.now() + 5000);
     return {
       id: job.id,
@@ -557,7 +589,7 @@ export class Manager {
       proofIncomplete: !written,
     };
   }
-  private async reclaimDeadPane(ref: LogRef, dir: string) {
+  private async reclaimDeadPane(ref: LogRef, dir: string, active: () => boolean) {
     const producer = JSON.parse(
       (await readPrivateFile(join(dir, "producer.json"), 4096)).toString("utf8"),
     );
@@ -590,19 +622,42 @@ export class Manager {
     if (!(await tm.verify())) throw new Error("Producer server is unavailable");
     const status = await tm.sourceStatus(producer.pane, ref.stream, producer.pid);
     if (status.state !== "exited") throw new Error("Producer is not a verified dead pane");
-    await tm.sourceOperation(producer.pane, ref.stream, producer.pid, "exited", "kill");
-    await writeStopProof(dir, {
-      version: 1,
-      stream: ref.stream,
-      state: "exited",
-      exitCode: status.exitCode,
-      signal: status.signal,
-    });
+    if (getStopEvidence(dir))
+      throw new Error("Stop evidence is already being recorded; retry later");
+    const entry = rememberStopEvidence(
+      dir,
+      {
+        version: 1,
+        stream: ref.stream,
+        state: "exited",
+        exitCode: status.exitCode,
+        signal: status.signal,
+      },
+      false,
+    );
+    try {
+      await tm.sourceOperation(producer.pane, ref.stream, producer.pid, "exited", "kill", active);
+      entry.confirmed = true;
+      await boundedIo(() => writeStopEvidence(dir, entry), 1000);
+      clearStopEvidence(dir, entry);
+    } catch (error) {
+      if (!entry.confirmed) clearStopEvidence(dir, entry);
+      throw error;
+    }
   }
-  private async verifyCaptureClosed(ref: LogRef, dir: string) {
+  private async verifyCaptureClosed(ref: LogRef, dir: string, active: () => boolean) {
+    const evidence = getStopEvidence(dir);
+    if (evidence) {
+      if (!evidence.confirmed)
+        throw new Error("Stop evidence is still being recorded; retry later");
+      if (!active()) throw new Error("Session closed before proof retry");
+      await boundedIo(() => writeStopEvidence(dir, evidence), 1000);
+      clearStopEvidence(dir, evidence);
+    }
     let proof = await readStopProof(dir, ref.stream).catch(() => undefined);
     if (!proof) {
-      await this.reclaimDeadPane(ref, dir).catch(() => {
+      await this.reclaimDeadPane(ref, dir, active).catch(() => {
+        if (!active()) throw new Error("Session closed before producer reclamation");
         throw new Error("Producer stop is unverified; cannot safely delete this source");
       });
       proof = await readStopProof(dir, ref.stream);
@@ -610,8 +665,8 @@ export class Manager {
     if (proof.state === "unstarted") return;
     const deadline = Date.now() + 5000;
     while (Date.now() < deadline) {
-      const metadata = await withTimeout(
-        readPrivateFile(join(dir, "capture.json"), 4096),
+      const metadata = await boundedIo(
+        () => readPrivateFile(join(dir, "capture.json"), 4096),
         Math.max(1, deadline - Date.now()),
       ).catch(() => undefined);
       if (!metadata) break;
@@ -630,19 +685,23 @@ export class Manager {
       (job) => job.ref.owner === ref.owner && job.ref.stream === ref.stream,
     );
   }
-  async deleteHistorical(ref: LogRef) {
+  async deleteHistorical(ref: LogRef, active = () => true) {
     const dir = await this.storage.resolve(ref);
-    await this.verifyCaptureClosed(ref, dir);
-    await this.storage.remove(ref);
+    await this.verifyCaptureClosed(ref, dir, active);
+    await this.storage.remove(ref, active);
     return { deleted: true };
   }
-  async forget(jobId: string) {
+  async forget(jobId: string, active = () => true) {
     const job = this.find(jobId);
     const status = await this.status(job);
     if (status.state === "running") throw new Error("Cannot forget a running capture source");
     if (job.pane && job.generation === this.generation) await this.tm?.waitCapture(job.pane);
-    await this.verifyCaptureClosed(job.ref, job.dir);
-    await this.storage.remove(job.ref);
+    const pending =
+      job.pendingProof ??
+      (this.tm?.captureResult(job.dir) as { pendingProof?: StopProof } | undefined)?.pendingProof;
+    if (pending && !getStopEvidence(job.dir)) rememberStopEvidence(job.dir, pending, true);
+    await this.verifyCaptureClosed(job.ref, job.dir, active);
+    await this.storage.remove(job.ref, active);
     this.jobsById.delete(job.id);
     this.tm?.forgetCaptureResult(job.dir);
     return { forgotten: jobId };
@@ -650,8 +709,8 @@ export class Manager {
   private async drainCapture(job: Job, deadline: number) {
     while (Date.now() < deadline) {
       try {
-        const metadata = await withTimeout(
-          readPrivateFile(join(job.dir, "capture.json"), 4096),
+        const metadata = await boundedIo(
+          () => readPrivateFile(join(job.dir, "capture.json"), 4096),
           Math.max(1, deadline - Date.now()),
         );
         const state = JSON.parse(metadata.toString("utf8"));
@@ -664,11 +723,10 @@ export class Manager {
     }
     return "incomplete";
   }
-  async serverStop() {
+  async serverStop(active = () => true) {
     if (!this.tm) return { stopped: false };
-    const states = await Promise.all(
-      [...this.jobsById.values()].map(async (job) => ({ job, status: await this.status(job) })),
-    );
+    const states = [];
+    for (const job of this.jobsById.values()) states.push({ job, status: await this.status(job) });
     const ownedServerStopped = await this.verified().catch(() => false);
     if (!ownedServerStopped)
       return {
@@ -676,44 +734,42 @@ export class Manager {
         unverified: true,
         error: "Cannot verify the owned server; no stop was issued",
       };
+    if (!active()) throw new Error("Session closed before server control");
     await checked(this.tm.args("kill-server"));
     this.tm.stopCaptureSupervisors();
-    const proofWrites = await Promise.all(
-      states.map(async ({ job, status }) => {
-        if (!ownedServerStopped || !job.pane || job.generation !== this.generation) return true;
-        const state =
-          status.state === "exited"
-            ? "exited"
-            : status.state === "capture_failed"
-              ? "capture_failed"
-              : status.state === "running" ||
-                  status.state === "capture_unverified" ||
-                  status.state === "cancelled"
-                ? "cancelled"
-                : "lost";
-        return withTimeout(
-          writeStopProof(job.dir, {
-            version: 1,
-            stream: job.ref.stream,
-            state,
-            exitCode: status.exitCode,
-            signal: status.signal,
-          }),
-          1000,
-        ).then(
-          () => true,
-          () => false,
-        );
-      }),
-    );
+    const proofWrites: boolean[] = [];
+    for (const { job, status } of states) {
+      if (!job.pane || job.generation !== this.generation) {
+        proofWrites.push(true);
+        continue;
+      }
+      const state =
+        status.state === "exited"
+          ? "exited"
+          : status.state === "capture_failed"
+            ? "capture_failed"
+            : status.state === "running" ||
+                status.state === "capture_unverified" ||
+                status.state === "cancelled"
+              ? "cancelled"
+              : "lost";
+      const ok = await this.publishProof(job, {
+        version: 1,
+        stream: job.ref.stream,
+        state,
+        exitCode: status.exitCode,
+        signal: status.signal,
+      });
+      proofWrites.push(ok);
+    }
     const deadline = Date.now() + 5000;
-    const captures = await Promise.all(
-      states.map(({ job, status }) =>
+    const captures: string[] = [];
+    for (const { job, status } of states)
+      captures.push(
         status.capture === "complete" || status.capture === "failed"
           ? status.capture
-          : this.drainCapture(job, deadline),
-      ),
-    );
+          : await this.drainCapture(job, deadline),
+      );
     for (let i = 0; i < states.length; i++) {
       const { job, status } = states[i];
       if (status.state === "running" || status.state === "capture_unverified") job.cancelled = true;
@@ -721,6 +777,7 @@ export class Manager {
         ...status,
         state: job.cancelled ? "cancelled" : status.state,
         capture: captures[i],
+        proofIncomplete: !proofWrites[i],
       };
     }
     const dir = this.dir;

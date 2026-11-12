@@ -10,6 +10,25 @@ export type StopProof = {
   exitCode?: number;
   signal?: string;
 };
+type Evidence = { proof: StopProof; confirmed: boolean };
+const evidenceKey = Symbol.for("pi-background-monitor:live-stop-evidence:v1");
+const root = globalThis as typeof globalThis & { [evidenceKey: symbol]: unknown };
+if (!root[evidenceKey]) root[evidenceKey] = new Map();
+const evidence = root[evidenceKey] as Map<string, Evidence>;
+/** Bounded, process-local evidence; never adopts a producer or restores a watch. */
+export function rememberStopEvidence(dir: string, proof: StopProof, confirmed: boolean) {
+  if (!evidence.has(dir) && evidence.size >= 128)
+    throw new Error("Stop evidence capacity exhausted");
+  const entry = { proof, confirmed };
+  evidence.set(dir, entry);
+  return entry;
+}
+export function getStopEvidence(dir: string) {
+  return evidence.get(dir);
+}
+export function clearStopEvidence(dir: string, entry: Evidence) {
+  if (evidence.get(dir) === entry) evidence.delete(dir);
+}
 export async function writeStopProof(dir: string, proof: StopProof) {
   const tmp = join(dir, `stopped-${randomBytes(8).toString("hex")}.tmp`);
   try {
@@ -17,6 +36,25 @@ export async function writeStopProof(dir: string, proof: StopProof) {
     await rename(tmp, join(dir, "stopped.json"));
   } finally {
     await rm(tmp, { force: true }).catch(() => {});
+  }
+}
+const writingKey = Symbol.for("pi-background-monitor:proof-writing:v1");
+if (!root[writingKey]) root[writingKey] = new Map();
+const writing = root[writingKey] as Map<string, Promise<void>>;
+/** Reject, rather than queue, retries while an uncancellable older write is pending. */
+export async function writeStopEvidence(
+  dir: string,
+  entry: Evidence,
+  write: (dir: string, proof: StopProof) => Promise<void> = writeStopProof,
+) {
+  if (!entry.confirmed || evidence.get(dir) !== entry) throw new Error("Stop evidence superseded");
+  if (writing.has(dir)) throw new Error("Stop proof write still in progress");
+  const operation = write(dir, entry.proof);
+  writing.set(dir, operation);
+  try {
+    await operation;
+  } finally {
+    if (writing.get(dir) === operation) writing.delete(dir);
   }
 }
 export async function readStopProof(dir: string, stream: string): Promise<StopProof> {

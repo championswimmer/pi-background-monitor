@@ -8,12 +8,29 @@ import { TextNormalizer } from "./text.mjs";
 import { withTimeout } from "./tmux.ts";
 
 type Delivery = "ui" | "nextTurn" | "wake";
+type MatchPosition = { sequence: number; normalizedOffsetUtf16: number };
+export type WatchEvent = {
+  id: string;
+  watchId: string;
+  jobId: string;
+  stream: string;
+  kind: string;
+  event: string;
+  count?: number;
+  total?: number;
+  cursor: number;
+  tail: number;
+  firstPosition?: MatchPosition;
+  lastPosition?: MatchPosition;
+  label?: string;
+  timestamp: string;
+};
 type Binding = {
   session: string;
   active: boolean;
   locate: () => unknown;
   persist: (x: unknown) => void;
-  notify: (text: string, delivery: Delivery) => void;
+  notify: (event: WatchEvent, delivery: Delivery) => void;
   limits: () => { maxOpen: number; maxTotal: number };
 };
 type Owner = { manager: Manager; binding?: Binding };
@@ -64,6 +81,9 @@ type Watch = {
   overflowReported: boolean;
   hits: number;
   pendingHits: number;
+  textPosition?: MatchPosition;
+  firstHitPosition?: MatchPosition;
+  lastHitPosition?: MatchPosition;
   gaps: number;
   prefixMissing: boolean;
   lastDelivery: number;
@@ -91,12 +111,16 @@ export type WatchOptions = {
   after?: LogCursor;
 };
 
+type PhysicalIO = {
+  mutations: number;
+  ioInFlight: number;
+  ownerIo: Map<string, number>;
+  initializing: Map<string, { binding: Binding; owner: Owner; settled: boolean }>;
+};
 class Broker {
+  constructor(private readonly physical: PhysicalIO) {}
   private regex = new RegexMatcher();
   private watchCursor = 0;
-  private ioInFlight = 0;
-  private ownerIo = new Map<string, number>();
-  private initializing = new Map<string, { binding: Binding; owner: Owner }>();
   private owners = new Map<string, Owner>();
   private monitors = new Map<string, Owner>();
   private subscribers = new Set<Binding>();
@@ -104,13 +128,28 @@ class Broker {
   private pending: Promise<unknown> = Promise.resolve();
   private timer?: ReturnType<typeof setInterval>;
   private polling = false;
-  private run<T>(fn: () => Promise<T>): Promise<T> {
-    const next = this.pending.then(fn);
+  private run<T>(fn: () => Promise<T>, cleanup = false): Promise<T> {
+    const next = this.pending.then(async () => {
+      if (!cleanup && this.physical.mutations >= 16)
+        throw new Error("Broker mutation capacity exhausted");
+      if (!cleanup) this.physical.mutations++;
+      try {
+        return await fn();
+      } finally {
+        if (!cleanup) this.physical.mutations--;
+      }
+    });
     this.pending = next.catch(() => {});
     return next;
   }
   join(binding: Binding) {
     this.subscribers.add(binding);
+  }
+  get empty() {
+    return this.subscribers.size === 0;
+  }
+  hasWatch(binding: Binding, id: string) {
+    return this.watches.get(id)?.subscriber === binding;
   }
   private owner(binding: Binding): Owner {
     if (!binding.active) throw new Error("No active Pi session");
@@ -123,7 +162,9 @@ class Broker {
         binding.session,
         () => (ref.binding?.active ? ref.binding.locate() : undefined),
         (x) => {
-          if (ref.binding?.active) ref.binding.persist(x);
+          if (!ref.binding?.active)
+            throw new Error("Session closed before log reference was saved");
+          ref.binding.persist(x);
         },
       );
       this.owners.set(binding.session, owner);
@@ -168,9 +209,29 @@ class Broker {
   async leave(binding: Binding) {
     binding.active = false;
     this.subscribers.delete(binding);
+    const lastBinding = this.subscribers.size === 0;
     for (const [id, w] of this.watches) if (w.subscriber === binding) this.watches.delete(id);
-    await this.run(async () => {
+    if (lastBinding) {
+      if (this.timer) clearInterval(this.timer);
+      this.timer = undefined;
+      this.regex.close();
+      for (const owner of this.owners.values()) void owner.manager.close();
+    }
+    const cleanup = this.run(async () => {
       for (const [id, w] of this.watches) if (w.subscriber === binding) this.watches.delete(id);
+      // New bindings may have joined while this mutation was stalled, but all
+      // their broker operations queue behind this departure's cleanup.
+      if (lastBinding) {
+        if (this.timer) clearInterval(this.timer);
+        this.timer = undefined;
+        this.watches.clear();
+        this.regex.close();
+        this.monitors.clear();
+        const owners = [...this.owners.values()];
+        this.owners.clear();
+        await Promise.all(owners.map((o) => o.manager.close()));
+        return;
+      }
       for (const [session, owner] of this.owners) {
         if (owner.binding === binding)
           owner.binding = [...this.subscribers].find((b) => b.active && b.session === session);
@@ -179,16 +240,10 @@ class Broker {
           await owner.manager.close();
         }
       }
-      if (this.subscribers.size) return;
-      if (this.timer) clearInterval(this.timer);
-      this.timer = undefined;
-      this.watches.clear();
-      this.regex.close();
-      this.monitors.clear();
-      const owners = [...this.owners.values()];
-      this.owners.clear();
-      await Promise.all(owners.map((o) => o.manager.close()));
-    });
+    }, true);
+    // A stalled filesystem/tmux mutation cannot be cancelled. Binding guards
+    // prevent its late completion from notifying the detached session.
+    await withTimeout(cleanup, 1000).catch(() => {});
   }
   start(binding: Binding, command: string, cwd: string, requestedId?: string) {
     return this.run(async () => {
@@ -210,7 +265,15 @@ class Broker {
         do jobId = randomBytes(12).toString("hex");
         while (this.monitors.has(jobId));
       }
-      const result = await owner.manager.run(() => owner.manager.start(command, cwd, jobId));
+      const result = await owner.manager.run(() =>
+        owner.manager.start(
+          command,
+          cwd,
+          jobId,
+          () => binding.active,
+          (ref) => binding.persist(ref),
+        ),
+      );
       this.monitors.set(result.id, owner);
       return result;
     });
@@ -235,7 +298,7 @@ class Broker {
         try {
           if (action === "history")
             return await historical.run(() => historical.inspectHistorical(ref, p.after));
-          return await historical.run(() => historical.deleteHistorical(ref));
+          return await historical.run(() => historical.deleteHistorical(ref, () => binding.active));
         } finally {
           await historical.close();
         }
@@ -255,6 +318,7 @@ class Broker {
         const w = p.id && this.watches.get(p.id);
         if (!w || w.subscriber !== binding) throw new Error("Unknown watch identity");
         if (action === "unwatch") {
+          this.deliverHits(w, true);
           this.watches.delete(w.id);
           return { removed: true };
         }
@@ -265,14 +329,15 @@ class Broker {
         await this.recover(binding);
       if (action === "server_stop") {
         const owner = p.id ? this.find(p.id) : this.owner(binding);
-        return owner.manager.run(() => owner.manager.serverStop());
+        return owner.manager.run(() => owner.manager.serverStop(() => binding.active));
       }
       const owner = this.find(p.id);
       if (action === "inspect")
         return owner.manager.run(() => owner.manager.inspect(p.id!, p.after));
-      if (action === "stop") return owner.manager.run(() => owner.manager.stop(p.id!));
+      if (action === "stop")
+        return owner.manager.run(() => owner.manager.stop(p.id!, () => binding.active));
       if (action === "forget") {
-        const r = await owner.manager.run(() => owner.manager.forget(p.id!));
+        const r = await owner.manager.run(() => owner.manager.forget(p.id!, () => binding.active));
         this.monitors.delete(p.id!);
         for (const w of this.watches.values()) if (w.job === p.id) this.finish(w, "source_removed");
         await this.releaseEmptyOwner(owner);
@@ -284,11 +349,13 @@ class Broker {
   private async addWatch(binding: Binding, p: WatchOptions) {
     const reservation = await this.run(async () => {
       if (!binding.active) throw new Error("No active Pi session");
-      const pending = [...this.initializing.values()];
+      const pending = [...this.physical.initializing.values()];
+      const logical = pending.filter((entry) => entry.binding.active);
+      const physical = pending.filter((entry) => !entry.settled);
       if (
-        this.watches.size + pending.length >= 64 ||
+        this.watches.size + logical.length >= 64 ||
         [...this.watches.values()].filter((w) => w.subscriber === binding).length +
-          pending.filter((v) => v.binding === binding).length >=
+          logical.filter((v) => v.binding === binding).length >=
           8
       )
         throw new Error("Maximum 8 watches per session and 64 shared watches");
@@ -318,29 +385,27 @@ class Broker {
       }
       const owner = this.find(p.id),
         jobId = p.id!;
-      const ownerCount = pending.filter(
+      const ownerCount = physical.filter(
         (v) => v.owner.manager.session === owner.manager.session,
       ).length;
       if (
-        this.ioInFlight + pending.length >= 16 ||
-        (this.ownerIo.get(owner.manager.session) ?? 0) + ownerCount >= 4
+        this.physical.ioInFlight + physical.length >= 16 ||
+        (this.physical.ownerIo.get(owner.manager.session) ?? 0) + ownerCount >= 4
       )
         throw new Error("Watch IO capacity exhausted; retry when pending operations settle");
       const token = randomBytes(12).toString("hex");
-      this.initializing.set(token, { binding, owner });
+      this.physical.initializing.set(token, { binding, owner, settled: false });
       return { token, owner, jobId, kind: p.kind, from: p.from ?? "now" };
     });
     const { owner, jobId, from } = reservation;
     const pending = owner.manager.watchStart(jobId, from, reservation.kind === "exit");
     let settled = false;
-    void pending.then(
-      () => {
-        settled = true;
-      },
-      () => {
-        settled = true;
-      },
-    );
+    const markSettled = () => {
+      settled = true;
+      const entry = this.physical.initializing.get(reservation.token);
+      if (entry) entry.settled = true;
+    };
+    void pending.then(markSettled, markSettled);
     try {
       const initial = await withTimeout(pending, 1000);
       return await this.run(async () => {
@@ -385,7 +450,7 @@ class Broker {
           ioInFlight: 0,
         };
         this.configure(w, p);
-        this.initializing.delete(reservation.token);
+        this.physical.initializing.delete(reservation.token);
         this.watches.set(w.id, w);
         if (initial.gap) {
           this.notice(w, "history_gap");
@@ -400,8 +465,8 @@ class Broker {
     } finally {
       const release = () =>
         this.run(async () => {
-          this.initializing.delete(reservation.token);
-        });
+          this.physical.initializing.delete(reservation.token);
+        }, true);
       if (settled) await release();
       else void pending.finally(() => void release()).catch(() => {});
     }
@@ -458,7 +523,22 @@ class Broker {
     if (!w.subscriber.active || this.watches.get(w.id) !== w) return;
     try {
       w.subscriber.notify(
-        `bgmon watch ${w.id} job ${w.job}: ${w.kind}, ${kind}${count === undefined ? "" : `, count: ${count}, total: ${w.hits}`}${w.label ? `, label: ${w.label}` : ""}`,
+        {
+          id: randomBytes(12).toString("hex"),
+          watchId: w.id,
+          jobId: w.job,
+          stream: w.stream,
+          kind: w.kind,
+          event: kind,
+          count,
+          total: count === undefined ? undefined : w.hits,
+          cursor: kind === "matched" ? (w.lastHitPosition?.sequence ?? w.cursor) : w.cursor,
+          tail: w.tail,
+          firstPosition: kind === "matched" ? w.firstHitPosition : undefined,
+          lastPosition: kind === "matched" ? w.lastHitPosition : undefined,
+          label: w.label || undefined,
+          timestamp: new Date().toISOString(),
+        },
         w.delivery,
       );
     } catch {
@@ -469,6 +549,8 @@ class Broker {
     if (!w.pendingHits || (!force && Date.now() - w.lastDelivery < 10000)) return;
     this.notice(w, "matched", w.pendingHits);
     w.pendingHits = 0;
+    w.firstHitPosition = undefined;
+    w.lastHitPosition = undefined;
     w.lastDelivery = Date.now();
   }
   private finish(w: Watch, state: Watch["state"], error?: string) {
@@ -498,6 +580,9 @@ class Broker {
     }
     w.hits++;
     w.pendingHits++;
+    const position = w.textPosition ?? { sequence: w.cursor, normalizedOffsetUtf16: 0 };
+    w.firstHitPosition ??= position;
+    w.lastHitPosition = position;
     if (w.once) {
       const integrity =
         w.terminalIntegrity ??
@@ -533,6 +618,7 @@ class Broker {
         const code = w.pending.codePointAt(w.pendingIndex)!;
         const char = String.fromCodePoint(code);
         w.pendingIndex += char.length;
+        w.textPosition = { sequence: w.pendingSeq, normalizedOffsetUtf16: w.pendingIndex };
         if (char === "\n") {
           lines++;
           if (w.skipPartial) w.skipPartial = false;
@@ -574,19 +660,20 @@ class Broker {
   }
   private startIo<T>(w: Watch, owner: Owner, fn: () => Promise<T>): Operation<T> | undefined {
     const ownerKey = owner.manager.session;
-    const initializingOwner = [...this.initializing.values()].filter(
+    const initializing = [...this.physical.initializing.values()].filter((entry) => !entry.settled);
+    const initializingOwner = initializing.filter(
       (entry) => entry.owner.manager.session === ownerKey,
     ).length;
     if (
-      this.ioInFlight + this.initializing.size >= 16 ||
-      (this.ownerIo.get(ownerKey) ?? 0) + initializingOwner >= 4 ||
+      this.physical.ioInFlight + initializing.length >= 16 ||
+      (this.physical.ownerIo.get(ownerKey) ?? 0) + initializingOwner >= 4 ||
       w.ioInFlight >= 2
     )
       return undefined;
     const operation: Operation<T> = { started: performance.now() };
-    this.ioInFlight++;
+    this.physical.ioInFlight++;
     w.ioInFlight++;
-    this.ownerIo.set(ownerKey, (this.ownerIo.get(ownerKey) ?? 0) + 1);
+    this.physical.ownerIo.set(ownerKey, (this.physical.ownerIo.get(ownerKey) ?? 0) + 1);
     void Promise.resolve()
       .then(fn)
       .then(
@@ -601,11 +688,11 @@ class Broker {
         },
       )
       .finally(() => {
-        this.ioInFlight--;
+        this.physical.ioInFlight--;
         w.ioInFlight--;
-        const remaining = (this.ownerIo.get(ownerKey) ?? 1) - 1;
-        if (remaining) this.ownerIo.set(ownerKey, remaining);
-        else this.ownerIo.delete(ownerKey);
+        const remaining = (this.physical.ownerIo.get(ownerKey) ?? 1) - 1;
+        if (remaining) this.physical.ownerIo.set(ownerKey, remaining);
+        else this.physical.ownerIo.delete(ownerKey);
       });
     return operation;
   }
@@ -833,6 +920,10 @@ class Broker {
         const ordered = all.slice(this.watchCursor).concat(all.slice(0, this.watchCursor));
         const budgetEnd = performance.now() + 200;
         for (const w of ordered) {
+          if (w.error === "broker_capacity") {
+            w.error = undefined;
+            this.notice(w, "read_resumed");
+          }
           if (!w.subscriber.active) {
             this.watches.delete(w.id);
             continue;
@@ -851,13 +942,55 @@ class Broker {
           this.timer = undefined;
         }
       });
+    } catch {
+      for (const w of this.watches.values()) {
+        if (w.state === "active" && w.error !== "broker_capacity") {
+          w.error = "broker_capacity";
+          this.notice(w, "broker_capacity");
+        }
+      }
     } finally {
       this.polling = false;
     }
   }
 }
+class BrokerHub {
+  private readonly physical: PhysicalIO = {
+    mutations: 0,
+    ioInFlight: 0,
+    ownerIo: new Map(),
+    initializing: new Map(),
+  };
+  private current = new Broker(this.physical);
+  private readonly bindings = new WeakMap<Binding, Broker>();
+  join(binding: Binding) {
+    this.bindings.set(binding, this.current);
+    this.current.join(binding);
+  }
+  hasWatch(binding: Binding, id: string) {
+    return this.bindings.get(binding)?.hasWatch(binding, id) ?? false;
+  }
+  leave(binding: Binding) {
+    const instance = this.bindings.get(binding);
+    if (!instance) return Promise.resolve();
+    this.bindings.delete(binding);
+    const cleanup = instance.leave(binding);
+    if (instance === this.current && instance.empty) this.current = new Broker(this.physical);
+    return cleanup;
+  }
+  start(binding: Binding, command: string, cwd: string, id?: string) {
+    const instance = this.bindings.get(binding);
+    if (!instance) throw new Error("No active Pi session");
+    return instance.start(binding, command, cwd, id);
+  }
+  action(binding: Binding, action: string, options: WatchOptions) {
+    const instance = this.bindings.get(binding);
+    if (!instance) throw new Error("No active Pi session");
+    return instance.action(binding, action, options);
+  }
+}
 const key = Symbol.for("pi-background-monitor:broker:v2");
 const global = globalThis as typeof globalThis & { [key: symbol]: unknown };
-if (!global[key]) global[key] = new Broker();
-export const broker = global[key] as Broker;
+if (!global[key]) global[key] = new BrokerHub();
+export const broker = global[key] as BrokerHub;
 export type { Binding, Delivery };

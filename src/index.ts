@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { type Binding, broker, type Delivery } from "./broker.ts";
+import { type Binding, broker } from "./broker.ts";
+import { LiveInbox } from "./delivery.ts";
 import { DEFAULT_LIMITS, dashboard, type Limits, validLimits } from "./ui.ts";
 
 const ENTRY = "pi-background-monitor:logref:v2";
@@ -16,41 +17,9 @@ export default function extension(pi: ExtensionAPI) {
   let binding: Binding | undefined;
   const dashboards = new Set<AbortController>();
   let limits: Limits = { ...DEFAULT_LIMITS };
-  let pending: { text: string; delivery: Delivery }[] = [];
-  let dropped = 0;
-  let lastMessage = 0;
-  let flushTimer: ReturnType<typeof setTimeout> | undefined;
-  function flush(current: Binding) {
-    flushTimer = undefined;
-    if (!current.active || binding !== current || !pending.length) return;
-    const delay = 10000 - (Date.now() - lastMessage);
-    if (delay > 0) {
-      flushTimer = setTimeout(() => flush(current), delay);
-      flushTimer.unref();
-      return;
-    }
-    const batch = pending.splice(0),
-      extra = dropped;
-    dropped = 0;
-    lastMessage = Date.now();
-    try {
-      pi.sendMessage(
-        {
-          customType: "pi-background-monitor:event",
-          content: (
-            batch.map((x) => x.text).join("\n") +
-            (extra ? `\n${extra} additional events suppressed` : "")
-          ).slice(0, 2048),
-          display: true,
-        },
-        batch.some((x) => x.delivery === "wake")
-          ? { deliverAs: "followUp", triggerTurn: true }
-          : { deliverAs: "nextTurn" },
-      );
-    } catch {
-      /* Delivery can fail during runtime teardown. */
-    }
-  }
+  let inbox: LiveInbox | undefined;
+  let settledTimer: ReturnType<typeof setTimeout> | undefined;
+  let generation = 0;
   function create(ctx: ExtensionContext) {
     const session = ctx.sessionManager.getSessionId();
     limits = { ...DEFAULT_LIMITS };
@@ -76,18 +45,31 @@ export default function extension(pi: ExtensionAPI) {
         return undefined;
       },
       persist: (locator) => pi.appendEntry(ENTRY, { session, locator }),
-      notify: (text, delivery) => {
-        if (!current.active || current !== binding) return;
-        if (delivery === "ui") {
-          if (ctx.hasUI) ctx.ui.notify(text, "info");
-          return;
-        }
-        if (pending.length < 16) pending.push({ text, delivery });
-        else dropped++;
-        if (!flushTimer) flush(current);
+      notify: (event, delivery) => {
+        if (current.active && current === binding) inbox?.push(event, delivery);
       },
     };
     binding = current;
+    inbox = new LiveInbox(
+      () => current.active && binding === current,
+      (mode, batchId, content) =>
+        pi.sendMessage(
+          {
+            customType: "pi-background-monitor:event",
+            content,
+            display: true,
+            details: { batchId, mode },
+          },
+          mode === "wake"
+            ? { deliverAs: "followUp", triggerTurn: true }
+            : { deliverAs: "nextTurn" },
+        ),
+      (text) => {
+        if (ctx.hasUI) ctx.ui.notify(text, "info");
+      },
+      () => ctx.isIdle(),
+      (id) => broker.hasWatch(current, id),
+    );
     broker.join(current);
   }
   function get() {
@@ -211,7 +193,7 @@ export default function extension(pi: ExtensionAPI) {
     name: "bgmon_watch",
     label: "Manage bgmon watches",
     description:
-      "Watch completed journal lines or job exit in this live session. Filters are any, literal contains, or JavaScript regex; from selects now or retained output. Retention gaps and capture failures are reported; wake may start a model turn.",
+      "Watch completed journal lines or job exit in this live session. Filters are any, literal contains, or JavaScript regex; from selects now or retained output. nextTurn waits for a user- or custom-started run; wake may start a run when idle. Submission remains unconfirmed until observed and may never be confirmed.",
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal("add"),
@@ -299,6 +281,32 @@ export default function extension(pi: ExtensionAPI) {
         }
       }),
   });
+  pi.registerTool({
+    name: "bgmon_events",
+    label: "Inspect bgmon events",
+    description:
+      "List or clear bounded in-memory events for this live session, including headless UI-only events. Match positions use a journal frame sequence and normalized UTF-16 offset, not raw byte offsets. Clearing history does not cancel pending delivery.",
+    parameters: Type.Object({ action: Type.Union([Type.Literal("list"), Type.Literal("clear")]) }),
+    execute: async (_id, p) =>
+      run(async () => {
+        fields(p, ["action"]);
+        get();
+        if (!inbox) throw new Error("No active event inbox");
+        if (p.action === "list") return inbox.list();
+        if (p.action === "clear") return inbox.clear();
+        throw new Error("Invalid events action");
+      }),
+  });
+  pi.on("message_end", (event) => {
+    const message = event.message;
+    if (message.role !== "custom" || message.customType !== "pi-background-monitor:event") return;
+    const details = message.details as { batchId?: unknown; mode?: unknown } | undefined;
+    if (
+      typeof details?.batchId === "string" &&
+      (details.mode === "wake" || details.mode === "nextTurn")
+    )
+      inbox?.observe(details.batchId, details.mode);
+  });
   pi.on("before_agent_start", (event) => {
     const options = event.systemPromptOptions;
     const lines: string[] = [];
@@ -315,20 +323,43 @@ export default function extension(pi: ExtensionAPI) {
       );
     if (lines.length) options.sections.background_monitor = lines.join("\n");
     else delete options.sections.background_monitor;
+    const message = inbox?.beforeAgent();
+    if (message) return { message };
   });
-  pi.on("session_start", (_event, ctx) => {
-    create(ctx);
+  pi.on("agent_settled", () => {
+    const current = inbox;
+    if (settledTimer) clearTimeout(settledTimer);
+    settledTimer = setTimeout(() => {
+      settledTimer = undefined;
+      current?.resume();
+    }, 0);
+    settledTimer.unref();
   });
-  pi.on("session_shutdown", async () => {
-    const old = binding;
+  pi.on("session_start", async (_event, ctx) => {
+    const currentGeneration = ++generation;
+    const previous = binding;
+    if (previous) previous.active = false;
     binding = undefined;
     for (const dashboard of dashboards) dashboard.abort();
     dashboards.clear();
-    if (flushTimer) clearTimeout(flushTimer);
-    flushTimer = undefined;
-    pending = [];
-    dropped = 0;
-    lastMessage = 0;
+    if (settledTimer) clearTimeout(settledTimer);
+    settledTimer = undefined;
+    inbox?.close();
+    inbox = undefined;
+    if (previous) await broker.leave(previous);
+    if (generation === currentGeneration) create(ctx);
+  });
+  pi.on("session_shutdown", async () => {
+    generation++;
+    const old = binding;
+    if (old) old.active = false;
+    binding = undefined;
+    for (const dashboard of dashboards) dashboard.abort();
+    dashboards.clear();
+    if (settledTimer) clearTimeout(settledTimer);
+    settledTimer = undefined;
+    inbox?.close();
+    inbox = undefined;
     if (old) await broker.leave(old);
   });
   pi.registerCommand("bgmon", {
@@ -349,23 +380,26 @@ export default function extension(pi: ExtensionAPI) {
         ctx.ui.notify("/bgmon settings requires TUI mode", "error");
         return;
       }
+      const current = get();
       if (command === "stop-server") {
-        const r = await run(() => broker.action(get(), "server_stop", {}));
-        ctx.ui.notify(r.content[0].text, "info");
+        const r = await run(() => broker.action(current, "server_stop", {}));
+        if (current.active && binding === current) ctx.ui.notify(r.content[0].text, "info");
         return;
       }
-      const r = await run(() => broker.action(get(), "list", {}));
+      const r = await run(() => broker.action(current, "list", {}));
+      if (!current.active || binding !== current) return;
       if (!ctx.hasUI || ctx.mode !== "tui") {
         ctx.ui.notify(r.content[0].text, "info");
         return;
       }
-      const w = await run(() => broker.action(get(), "watches", {}));
+      const w = await run(() => broker.action(current, "watches", {}));
+      if (!current.active || binding !== current) return;
       const listError = !Array.isArray(r.details)
         ? r.content[0].text
         : !Array.isArray(w.details)
           ? w.content[0].text
           : undefined;
-      const current = get();
+      const currentInbox = inbox;
       const controller = new AbortController();
       dashboards.add(controller);
       try {
@@ -381,7 +415,12 @@ export default function extension(pi: ExtensionAPI) {
           },
           command === "settings" ? "settings" : "list",
           listError,
-          { inspect: (id) => broker.action(current, "inspect", { id }), signal: controller.signal },
+          {
+            inspect: (id) => broker.action(current, "inspect", { id }),
+            signal: controller.signal,
+            eventStatus: () =>
+              currentInbox?.status() ?? { events: 0, coalesced: 0, queued: 0, inFlight: 0 },
+          },
         );
       } finally {
         dashboards.delete(controller);

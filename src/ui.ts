@@ -23,7 +23,11 @@ type Snapshot = {
   captureHealth?: string;
   parserUncertain?: boolean;
 };
-type Viewer = { inspect: (id: string) => Promise<unknown>; signal: AbortSignal };
+type Viewer = {
+  inspect: (id: string) => Promise<unknown>;
+  signal: AbortSignal;
+  eventStatus?: () => { events: number; coalesced: number; queued: number; inFlight: number };
+};
 type Job = { id: string; state: string; command?: string };
 type Watch = {
   job: string;
@@ -32,6 +36,8 @@ type Watch = {
   state: string;
   hits: number;
   gaps: number;
+  cursor: number;
+  tail: number;
   delivery: string;
   id: string;
 };
@@ -284,13 +290,19 @@ export async function dashboard(
           ];
           return frame(lines, width, tui.terminal.rows || 24, (s) => theme.fg("border", s));
         }
+        const status = viewer?.eventStatus?.();
         const lines: string[] = [
           ...tabs,
           theme.fg(
             "muted",
             `${jobs.length} shared monitor${jobs.length === 1 ? "" : "s"} · ${watches.length} session watch${watches.length === 1 ? "" : "es"}`,
           ),
-          "",
+          status
+            ? theme.fg(
+                "muted",
+                `Events ${status.events}${status.coalesced ? ` +${status.coalesced} coalesced` : ""} · queued ${status.queued} · in flight ${status.inFlight}`,
+              )
+            : "",
         ];
         if (listError) lines.push(theme.fg("error", safe(listError)));
         else if (!jobs.length) lines.push("No monitors yet. Start one with bgmon_start.");
@@ -315,7 +327,7 @@ export async function dashboard(
             lines.push(`Watches: ${own.length} in this session`);
             for (const w of own.slice(0, 3))
               lines.push(
-                `  ${safe(w.kind)} · ${safe(w.state)} · hits ${w.hits} · gaps ${w.gaps} · ${safe(w.delivery)}`,
+                `  ${safe(w.kind)} · ${safe(w.state)} · hits ${w.hits} · lag ${Math.max(0, w.tail - w.cursor)} frames · gaps ${w.gaps} · ${safe(w.delivery)}`,
               );
             if (own.length > 3) lines.push(`  +${own.length - 3} more watches`);
           }
