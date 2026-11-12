@@ -22,6 +22,17 @@ async function waitForBackground(promise: Promise<void>) {
 
 const delay = () => new Promise((resolve) => setTimeout(resolve, 20));
 
+// Killing the server closes the pipe asynchronously; let the detached sink
+// finish publishing before removing its private directory.
+async function cleanupCapture(dir: string) {
+  for (let i = 0; i < 250; i++) {
+    const raw = await readFile(join(dir, "capture", "capture.json"), "utf8").catch(() => "");
+    if (!raw || ["complete", "failed"].includes(JSON.parse(raw).health)) break;
+    await delay();
+  }
+  await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}
+
 test("gated capture records first and last bytes and exit status", async () => {
   const d = await createDirectory();
   const tm = new Tmux(d.socket, d.dir, d.token);
@@ -351,7 +362,7 @@ test("a respawned pane is not killed or proved dead by the old supervisor", asyn
     tm.sourceOperation = operation;
     tm.stopCaptureSupervisors();
     await checked(tm.args("kill-server")).catch(() => {});
-    await rm(d.dir, { recursive: true, force: true });
+    await cleanupCapture(d.dir);
   }
 });
 
@@ -522,6 +533,6 @@ test("an unverified dead pane never authorizes removal or proof of a dead replac
   } finally {
     tm.stopCaptureSupervisors();
     await checked(tm.args("kill-server")).catch(() => {});
-    await rm(d.dir, { recursive: true, force: true });
+    await cleanupCapture(d.dir);
   }
 });
