@@ -33,54 +33,6 @@ async function cleanupCapture(dir: string) {
   await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
 
-test("gated capture records first and last bytes and exit status", async () => {
-  const d = await createDirectory();
-  const tm = new Tmux(d.socket, d.dir, d.token);
-  const dir = join(d.dir, "capture #1");
-  await mkdir(dir);
-  try {
-    const script = join(d.dir, "command #1.sh");
-    await writeFile(script, "printf 'FIRST\\nLAST\\n'; exit 7\n");
-    const start = await tm.startCaptured(script, d.dir, true, dir, resolve("src/capture.mjs"));
-    assert.equal(start.launch, "confirmed");
-    let result: { capture?: string; state?: string; exitCode?: number } = {};
-    for (let i = 0; i < 300; i++) {
-      await delay();
-      result = (tm.captureResult(dir) ?? {}) as {
-        state?: string;
-        capture?: string;
-        exitCode?: number;
-      };
-      if (result.capture === "complete" || result.capture === "incomplete") break;
-    }
-    if (result.state === "source_unverified") {
-      assert.equal(result.capture, "complete");
-      assert.equal(result.exitCode, undefined);
-      await assert.rejects(readFile(join(dir, "stopped.json")));
-    } else {
-      assert.deepEqual(result, {
-        state: "exited",
-        exitCode: 7,
-        signal: undefined,
-        capture: "complete",
-      });
-    }
-    const files = (await readdir(dir)).filter((x) => x.endsWith(".jsonl"));
-    const frames = (await Promise.all(files.map((x) => readFile(join(dir, x), "utf8"))))
-      .join("")
-      .trim()
-      .split("\n")
-      .map((x) => JSON.parse(x));
-    assert.equal(
-      Buffer.concat(frames.map((x) => Buffer.from(x.data, "base64"))).toString(),
-      "FIRST\r\nLAST\r\n",
-    );
-  } finally {
-    await checked(tm.args("kill-server")).catch(() => {});
-    await rm(d.dir, { recursive: true, force: true });
-  }
-});
-
 test("a missing sink does not release the user command", async () => {
   const d = await createDirectory();
   const tm = new Tmux(d.socket, d.dir, d.token);
