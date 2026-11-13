@@ -2751,3 +2751,90 @@ test("live monitor origins belong to their creating sessions", async () => {
     await root.close();
   }
 });
+
+test("group limits apply across concurrent children and retained departed jobs", async () => {
+  const settings = [
+    {
+      type: "custom",
+      customType: "pi-background-monitor:settings:v1",
+      data: {
+        session: "group-root",
+        limits: { maxOpen: 1, maxTotal: 2 },
+      },
+    },
+  ];
+  const root = runtime("group-root", settings);
+  const child = (name: string) =>
+    runtime(name, [
+      {
+        type: "custom",
+        customType: "pi-subagent:thread:v1",
+        data: {
+          rootId: "group-root",
+          threadPath: `/root/${name}`,
+          inheritedCount: 0,
+        },
+      },
+    ]);
+  const a = child("child-a"),
+    b = child("child-b"),
+    other = runtime("other-group");
+  await root.start();
+  await a.start();
+  await b.start();
+  await other.start();
+  try {
+    const results = await Promise.all([
+      a.call("bgmon_start", { command: "sleep 30" }),
+      b.call("bgmon_start", { command: "sleep 30" }),
+    ]);
+    const winner = results.find((v: any) => v.id);
+    assert.ok(winner);
+    assert.match(results.find((v: any) => v.error).error, /Maximum 1 running/);
+    assert.ok((await other.call("bgmon_start", { command: "sleep 30" })).id);
+    await root.call("bgmon_control", { action: "stop", id: winner.id });
+    await a.close();
+    await b.close();
+    const next = await root.call("bgmon_start", { command: "sleep 30" });
+    assert.ok(next.id, JSON.stringify(next));
+    assert.match(
+      (await root.call("bgmon_start", { command: "exit 0" })).error,
+      /Maximum 2 retained/,
+    );
+    await root.call("bgmon_control", { action: "forget", id: winner.id });
+    assert.match(
+      (await root.call("bgmon_start", { command: "exit 0" })).error,
+      /Maximum 1 running/,
+    );
+  } finally {
+    const all = await root.call("bgmon_inspect", {});
+    for (const j of all) await root.call("bgmon_control", { action: "server_stop", id: j.id });
+    await other.close();
+    await a.close();
+    await b.close();
+    await root.close();
+  }
+});
+
+test("child-only groups use defaults rather than child settings", async () => {
+  const child = runtime("orphan-child", [
+    {
+      type: "custom",
+      customType: "pi-subagent:thread:v1",
+      data: { rootId: "absent-root", threadPath: "/root/child", inheritedCount: 0 },
+    },
+    {
+      type: "custom",
+      customType: "pi-background-monitor:settings:v1",
+      data: { session: "orphan-child", limits: { maxOpen: 1, maxTotal: 1 } },
+    },
+  ]);
+  await child.start();
+  try {
+    assert.ok((await child.call("bgmon_start", { command: "sleep 30" })).id);
+    assert.ok((await child.call("bgmon_start", { command: "sleep 30" })).id);
+  } finally {
+    await child.call("bgmon_control", { action: "server_stop" });
+    await child.close();
+  }
+});

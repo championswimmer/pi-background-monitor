@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { SessionIdentity } from "./identity.ts";
+import { DEFAULT_LIMITS } from "./limits.ts";
 import type { Frame } from "./journal.ts";
 import { type LogCursor, Manager, validId } from "./manager.ts";
 import { sanitize } from "./output.ts";
@@ -260,12 +261,29 @@ class Broker {
       if (requestedId !== undefined && this.monitors.has(requestedId))
         throw new Error("Duplicate monitor identity");
       if (this.monitors.size >= 64) throw new Error("Maximum 64 shared monitors");
-      const jobs = await owner.manager.run(() => owner.manager.jobs());
-      const limits = binding.limits();
+      const groupOwners = [...this.owners.values()].filter(
+        (candidate) => candidate.identity.group === binding.identity.group,
+      );
+      const jobs = (
+        await Promise.all(
+          groupOwners.map((candidate) => candidate.manager.run(() => candidate.manager.jobs())),
+        )
+      ).flat();
+      const root = [...this.subscribers].find(
+        (candidate) =>
+          candidate.active &&
+          candidate.identity.role === "root" &&
+          candidate.identity.group === binding.identity.group,
+      );
+      const limits = root?.limits() ?? DEFAULT_LIMITS;
       if (jobs.length >= limits.maxTotal)
-        throw new Error(`Maximum ${limits.maxTotal} retained jobs; forget a finished job first`);
+        throw new Error(
+          `Maximum ${limits.maxTotal} retained jobs (shared by /root and its subagents); forget a finished job first`,
+        );
       if (jobs.filter((job) => job.state === "running").length >= limits.maxOpen)
-        throw new Error(`Maximum ${limits.maxOpen} running jobs`);
+        throw new Error(
+          `Maximum ${limits.maxOpen} running jobs (shared by /root and its subagents)`,
+        );
       let jobId = requestedId;
       if (jobId === undefined) {
         do jobId = randomBytes(12).toString("hex");
