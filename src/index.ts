@@ -1,8 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { type Binding, broker } from "./broker.ts";
-import { readSubagentIdentity } from "./identity.ts";
 import { LiveInbox } from "./delivery.ts";
+import { readSubagentIdentity } from "./identity.ts";
 import { DEFAULT_LIMITS, dashboard, type Limits, validLimits } from "./ui.ts";
 
 const ENTRY = "pi-background-monitor:logref:v2";
