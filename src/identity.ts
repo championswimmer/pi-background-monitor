@@ -21,7 +21,10 @@ export function readSubagentIdentity(entries: readonly unknown[]): SessionIdenti
     typeof rootId !== "string" ||
     !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(rootId) ||
     typeof threadPath !== "string" ||
-    !/^\/(?:[A-Za-z0-9_-]+)(?:\/[A-Za-z0-9_-]+)*$/.test(threadPath) ||
+    !/^\/(?:[A-Za-z0-9][A-Za-z0-9_-]{0,63})(?:\/[A-Za-z0-9][A-Za-z0-9_-]{0,63})*$/.test(
+      threadPath,
+    ) ||
+    threadPath.split("/").length > 33 ||
     threadPath === "/root" ||
     !Number.isSafeInteger(inheritedCount) ||
     (inheritedCount as number) < 0
