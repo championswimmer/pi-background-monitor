@@ -27,7 +27,6 @@ test("private server retains fast exit and asynchronous jobs", async () => {
     for (let i = 0; i < 50 && (await tm.status(pane)).state === "running"; i++)
       await new Promise((r) => setTimeout(r, 20));
     assert.deepEqual(await tm.status(pane), { state: "exited", exitCode: 7, signal: undefined });
-    assert.match((await tm.capture(pane)).stdout, /READY/);
     await writeFile(file, "sleep 2\n");
     const t = Date.now();
     const p2 = await tm.start(file, d.dir, false);
@@ -37,4 +36,31 @@ test("private server retains fast exit and asynchronous jobs", async () => {
     await checked(tm.args("kill-server")).catch(() => {});
     await rm(d.dir, { recursive: true, force: true });
   }
+});
+
+test("timed filesystem admission holds slots until underlying operations settle", async () => {
+  const { boundedIo } = await import("../src/tmux.ts");
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const operations = Array.from({ length: 16 }, () =>
+    boundedIo(() => gate, 10).catch(() => undefined),
+  );
+  try {
+    await Promise.all(operations);
+    let launched = false;
+    await assert.rejects(
+      boundedIo(async () => {
+        launched = true;
+      }, 100),
+      /capacity exhausted/,
+    );
+    assert.equal(launched, false);
+  } finally {
+    release();
+    await gate;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(await boundedIo(async () => "ok", 100), "ok");
 });

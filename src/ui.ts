@@ -19,14 +19,25 @@ type Snapshot = {
   timestamp?: string;
   untrustedOutput?: { text: string; truncated: boolean };
   clientTruncated?: boolean;
+  gap?: boolean;
+  captureHealth?: string;
+  parserUncertain?: boolean;
 };
-type Viewer = { inspect: (id: string) => Promise<unknown>; signal: AbortSignal };
+type Viewer = {
+  inspect: (id: string) => Promise<unknown>;
+  signal: AbortSignal;
+  eventStatus?: () => { events: number; coalesced: number; queued: number; inFlight: number };
+};
 type Job = { id: string; state: string; command?: string };
 type Watch = {
   job: string;
   kind: string;
-  intervalSeconds: number;
-  expires: string;
+  expires?: string;
+  state: string;
+  hits: number;
+  gaps: number;
+  cursor: number;
+  tail: number;
   delivery: string;
   id: string;
 };
@@ -205,7 +216,7 @@ export async function dashboard(
                   .flatMap((line) =>
                     line ? wrapTextWithAnsi(line, Math.max(1, width - 2)) : [""],
                   );
-          // capture-pane includes unused screen rows; trailing blanks would hide short output.
+          // Trailing blanks would hide short output in the viewer.
           while (output.length && !output[output.length - 1].trim()) output.pop();
           const capacity = Math.max(1, rows - 12);
           maxTop = Math.max(0, output.length - capacity);
@@ -213,6 +224,13 @@ export async function dashboard(
           const body = output.slice(displayedTop, displayedTop + capacity);
           const flags =
             snapshot?.untrustedOutput?.truncated || snapshot?.clientTruncated ? " · truncated" : "";
+          const warning = snapshot?.gap
+            ? "history gap; parser context uncertain"
+            : snapshot?.parserUncertain
+              ? "parser context uncertain"
+              : snapshot?.captureHealth && !["ready", "complete"].includes(snapshot.captureHealth)
+                ? `capture ${safe(snapshot.captureHealth)}`
+                : "";
           const lines = [
             ...tabs,
             theme.fg(
@@ -221,9 +239,13 @@ export async function dashboard(
             ),
             theme.fg(
               "muted",
-              `Read-only snapshot · updated ${safe(snapshot?.timestamp ?? lastUpdate ?? "never")}`,
+              `Read-only log · updated ${safe(snapshot?.timestamp ?? lastUpdate ?? "never")}`,
             ),
-            error ? theme.fg("error", `Refresh failed: ${safe(error)}`) : "",
+            error
+              ? theme.fg("error", `Refresh failed: ${safe(error)}`)
+              : warning
+                ? theme.fg("error", warning)
+                : "",
             ...(body.length
               ? body
               : [
@@ -268,13 +290,19 @@ export async function dashboard(
           ];
           return frame(lines, width, tui.terminal.rows || 24, (s) => theme.fg("border", s));
         }
+        const status = viewer?.eventStatus?.();
         const lines: string[] = [
           ...tabs,
           theme.fg(
             "muted",
             `${jobs.length} shared monitor${jobs.length === 1 ? "" : "s"} · ${watches.length} session watch${watches.length === 1 ? "" : "es"}`,
           ),
-          "",
+          status
+            ? theme.fg(
+                "muted",
+                `Events ${status.events}${status.coalesced ? ` +${status.coalesced} coalesced` : ""} · queued ${status.queued} · in flight ${status.inFlight}`,
+              )
+            : "",
         ];
         if (listError) lines.push(theme.fg("error", safe(listError)));
         else if (!jobs.length) lines.push("No monitors yet. Start one with bgmon_start.");
@@ -299,7 +327,7 @@ export async function dashboard(
             lines.push(`Watches: ${own.length} in this session`);
             for (const w of own.slice(0, 3))
               lines.push(
-                `  ${safe(w.kind)} · every ${w.intervalSeconds}s · expires ${safe(w.expires)} · ${safe(w.delivery)}`,
+                `  ${safe(w.kind)} · ${safe(w.state)} · hits ${w.hits} · lag ${Math.max(0, w.tail - w.cursor)} frames · gaps ${w.gaps} · ${safe(w.delivery)}`,
               );
             if (own.length > 3) lines.push(`  +${own.length - 3} more watches`);
           }

@@ -86,9 +86,11 @@ test("output view polls serially, ignores stale results, and cancels on shutdown
     id: "two",
     state: "running",
     timestamp: "NOW",
+    gap: true,
     untrustedOutput: { text: content, truncated: true },
   });
   await flush();
+  assert.match(component.render(80).join("\n"), /history gap/);
   let output = component.render(40);
   assert.match(output.join("\n"), /SAFE {4}end/);
   assert.match(output.join("\n"), /truncated/);
@@ -107,6 +109,7 @@ test("output view polls serially, ignores stale results, and cancels on shutdown
     id: "two",
     state: "running",
     timestamp: "NOW",
+    gap: true,
     untrustedOutput: { text: `${content}\nNEW LINE`, truncated: true },
   });
   await flush();

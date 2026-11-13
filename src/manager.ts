@@ -1,44 +1,88 @@
-import { randomBytes } from "node:crypto";
-import { lstat, mkdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { createHash, randomBytes } from "node:crypto";
+import { lstat, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  journalBoundary,
+  journalInfo,
+  readJournal,
+  readJournalTail,
+  readPrivateFile,
+} from "./journal.ts";
 import { MAX_MONITORS } from "./limits.ts";
 import { bounded, quote, sanitize } from "./output.ts";
-import { checked, client, createDirectory, probe, Tmux } from "./tmux.ts";
+import {
+  clearStopEvidence,
+  getStopEvidence,
+  readStopProof,
+  rememberStopEvidence,
+  type StopProof,
+  writeStopEvidence,
+  writeStopProof,
+} from "./proof.ts";
+import { type LogRef, LogStorage } from "./storage.ts";
+import { TextNormalizer } from "./text.mjs";
+import { boundedIo, checked, createDirectory, probe, Tmux } from "./tmux.ts";
 
 type Job = {
   id: string;
-  pane?: string;
   created: string;
-  command?: string;
+  command: string;
+  ref: LogRef;
+  dir: string;
+  pane?: string;
+  pid?: number;
+  generation: number;
   cancelled?: boolean;
-  finalOutput?: { text: string; truncated: boolean };
+  failure?: string;
+  final?: Status;
+  pendingProof?: StopProof;
 };
-type Locator = { session: string; dir: string; token: string };
-type Registry = Locator & { version: 1; jobs: Job[] };
+type Status = {
+  state: string;
+  exitCode?: number;
+  signal?: string;
+  capture?: string;
+  error?: string;
+  proofIncomplete?: boolean;
+};
+export type LogCursor = { sequence: number; offset: number };
 const id = () => randomBytes(12).toString("hex");
+function completeUtf8Prefix(data: Buffer, end: number) {
+  let start = end - 1;
+  while (start >= 0 && end - start <= 4 && (data[start] & 0xc0) === 0x80) start--;
+  if (start < 0) return end;
+  const byte = data[start];
+  const expected =
+    byte >= 0xc2 && byte <= 0xdf
+      ? 2
+      : byte >= 0xe0 && byte <= 0xef
+        ? 3
+        : byte >= 0xf0 && byte <= 0xf4
+          ? 4
+          : 1;
+  return expected > end - start ? start : end;
+}
 export const validId = (x: unknown): x is string =>
   typeof x === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(x);
-function validLocator(x: Locator, session: string): boolean {
-  return (
-    !!x &&
-    x.session === session &&
-    typeof x.dir === "string" &&
-    /^\/tmp\/pbm-[A-Za-z0-9]{6}$/.test(x.dir) &&
-    typeof x.token === "string" &&
-    /^[a-f0-9]{48}$/.test(x.token)
-  );
-}
+
+/** A controller is live-process scoped; stored references are data, not controllers. */
 export class Manager {
-  private data?: Registry;
+  private readonly storage: LogStorage;
+  private jobsById = new Map<string, Job>();
   private tm?: Tmux;
-  private locked = false;
+  private dir?: string;
+  private generation = 0;
   private closed = false;
   private pending: Promise<unknown> = Promise.resolve();
   constructor(
     readonly session: string,
-    readonly locate: () => unknown,
-    readonly persist: (x: Locator | null) => void,
-  ) {}
+    _locate: () => unknown,
+    readonly persist: (x: LogRef | null) => void,
+    root?: string,
+  ) {
+    this.storage = new LogStorage(session, root);
+  }
   run<T>(fn: () => Promise<T>): Promise<T> {
     const p = this.pending.then(() => {
       if (this.closed) throw new Error("Session closed");
@@ -49,125 +93,17 @@ export class Manager {
   }
   async close() {
     this.closed = true;
+    this.tm?.stopCaptureSupervisors();
     await this.pending;
-    if (this.locked && this.data) {
-      await rm(join(this.data.dir, "lock"), { recursive: true, force: true });
-      this.locked = false;
-    }
   }
-  private async acquire(dir: string) {
-    try {
-      await mkdir(join(dir, "lock"), { mode: 0o700 });
-      this.locked = true;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "EEXIST")
-        throw new Error(
-          `Controller lock exists: ${dir}/lock. If no Pi process uses this session, remove it manually.`,
-        );
-      throw e;
-    }
-  }
-  private async directoryExists(dir: string): Promise<boolean> {
-    try {
-      const ds = await lstat(dir);
-      if (
-        !ds.isDirectory() ||
-        ds.isSymbolicLink() ||
-        ds.uid !== process.getuid?.() ||
-        (ds.mode & 0o077) !== 0
-      )
-        throw new Error("Unsafe background directory");
-      return true;
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
-      throw e;
-    }
-  }
-  private async load(create: boolean) {
-    if (this.data) {
-      if (await this.directoryExists(this.data.dir)) return;
-      this.data = undefined;
-      this.tm = undefined;
-      this.locked = false;
-      this.persist(null);
-    }
-    let locator = this.locate() as Locator | null | undefined;
-    if (locator) {
-      if (!validLocator(locator, this.session))
-        throw new Error("Invalid background server locator; refusing recovery");
-      if (!(await this.directoryExists(locator.dir))) {
-        this.persist(null);
-        locator = null;
-      }
-    }
-    if (!locator) {
-      if (!create) return;
+  private async ensureTmux() {
+    if (!this.tm) {
       await probe();
       const d = await createDirectory();
-      await this.acquire(d.dir);
-      this.data = { version: 1, session: this.session, dir: d.dir, token: d.token, jobs: [] };
+      this.dir = d.dir;
       this.tm = new Tmux(d.socket, d.dir, d.token);
-      await this.save();
-      this.persist({ session: this.session, dir: d.dir, token: d.token });
-      return;
     }
-    await this.acquire(locator.dir);
-    try {
-      const path = join(locator.dir, "registry.json"),
-        s = await lstat(path);
-      if (
-        !s.isFile() ||
-        s.isSymbolicLink() ||
-        s.size > 8 * 1024 * 1024 ||
-        s.uid !== process.getuid?.() ||
-        s.mode & 0o077
-      )
-        throw new Error("Unsafe registry");
-      const data = JSON.parse(await readFile(path, "utf8")) as Registry;
-      if (
-        data.version !== 1 ||
-        !validLocator(data, this.session) ||
-        data.dir !== locator.dir ||
-        data.token !== locator.token ||
-        !Array.isArray(data.jobs) ||
-        data.jobs.length > MAX_MONITORS ||
-        new Set(data.jobs.map((j) => (typeof j.id === "string" ? j.id.toLowerCase() : j.id)))
-          .size !== data.jobs.length ||
-        data.jobs.some(
-          (j) =>
-            !validId(j.id) ||
-            (j.command !== undefined &&
-              (typeof j.command !== "string" || j.command.length > 512)) ||
-            (j.pane !== undefined && !/^%\d+$/.test(j.pane)) ||
-            (j.finalOutput !== undefined &&
-              (typeof j.finalOutput.text !== "string" ||
-                Buffer.byteLength(j.finalOutput.text) > 16384 ||
-                typeof j.finalOutput.truncated !== "boolean")),
-        )
-      )
-        throw new Error("Invalid registry");
-      this.data = data;
-      this.tm = new Tmux(join(data.dir, "s"), data.dir, data.token);
-      const socket = await lstat(this.tm.socket).catch(() => undefined);
-      if (socket) {
-        if (!socket.isSocket() || socket.uid !== process.getuid?.())
-          throw new Error("Unsafe tmux socket");
-        await this.tm.verify();
-      }
-    } catch (e) {
-      this.data = undefined;
-      this.tm = undefined;
-      await rm(join(locator.dir, "lock"), { recursive: true, force: true });
-      this.locked = false;
-      throw e;
-    }
-  }
-  private async save() {
-    if (!this.data) throw new Error("No registry");
-    const path = join(this.data.dir, "registry.json"),
-      tmp = `${path}.${id()}`;
-    await writeFile(tmp, JSON.stringify(this.data), { mode: 0o600, flag: "wx" });
-    await rename(tmp, path);
+    return this.tm;
   }
   private async verified(): Promise<boolean> {
     if (!this.tm) return false;
@@ -178,143 +114,703 @@ export class Manager {
   }
   private find(jobId: string) {
     if (!validId(jobId)) throw new Error("Invalid job ID");
-    const j = this.data?.jobs.find((x) => x.id === jobId);
+    const j = this.jobsById.get(jobId);
     if (!j) throw new Error("Unknown job");
     return j;
   }
-  async start(command: string, cwd: string, requestedId?: string) {
+  private async status(j: Job): Promise<Status> {
+    if (j.final) {
+      if (j.final.proofIncomplete && !j.pendingProof && !getStopEvidence(j.dir)?.confirmed) {
+        const { proofIncomplete: _previous, ...current } = j.final;
+        return current;
+      }
+      return j.final;
+    }
+    if (j.cancelled) return { state: "cancelled" };
+    if (j.failure) return { state: "capture_failed", capture: "unknown" };
+    const result = this.tm?.captureResult(j.dir) as
+      | (Status & { pendingProof?: StopProof })
+      | undefined;
+    if (result) {
+      const { proofIncomplete: _previous, ...current } = result;
+      return result.pendingProof || getStopEvidence(j.dir)?.confirmed
+        ? { ...current, proofIncomplete: true }
+        : current;
+    }
+    if (!j.pane || !j.pid || j.generation !== this.generation)
+      return { state: "lost", capture: "unknown" };
+    try {
+      if (!(await this.verified())) return { state: "capture_unverified", capture: "unknown" };
+      const current = await this.tm!.sourceStatus(j.pane, j.ref.stream, j.pid);
+      if (current.state === "unverified")
+        return {
+          state: "source_unverified",
+          capture: "unknown",
+          error: "Dead pane producer identity unavailable",
+        };
+      return current.state === "changed" ? { state: "lost", capture: "unknown" } : current;
+    } catch {
+      return { state: "capture_unverified", capture: "unknown" };
+    }
+  }
+  async start(
+    command: string,
+    cwd: string,
+    requestedId?: string,
+    active = () => true,
+    persist = this.persist,
+  ) {
+    const checkActive = () => {
+      if (this.closed || !active()) throw new Error("Session closed during startup");
+    };
+    checkActive();
     if (requestedId !== undefined && !validId(requestedId)) throw new Error("Invalid job ID");
     if (typeof command !== "string" || !command.trim() || Buffer.byteLength(command) > 65536)
       throw new Error("Command must be 1–65536 bytes");
     if (!(await stat(cwd)).isDirectory()) throw new Error("cwd is not a directory");
-    await this.load(true);
-    const d = this.data!,
-      tm = this.tm!;
-    if (d.jobs.length >= MAX_MONITORS)
+    if (this.jobsById.size >= MAX_MONITORS)
       throw new Error(`Maximum ${MAX_MONITORS} retained jobs; forget a finished job first`);
     const jobId = requestedId ?? id();
-    if (d.jobs.some((job) => job.id.toLowerCase() === jobId.toLowerCase()))
+    if ([...this.jobsById.keys()].some((x) => x.toLowerCase() === jobId.toLowerCase()))
       throw new Error("Duplicate monitor identity (case-insensitive within a server)");
-    const exists = await this.verified();
-    if (!exists && d.jobs.length)
-      throw new Error(
-        "Server is missing; jobs lost. Stop the server record before starting again.",
-      );
+    const tm = await this.ensureTmux();
+    const { ref, dir } = await this.storage.reserve();
     const job: Job = {
       id: jobId,
+      ref,
+      dir,
       created: new Date().toISOString(),
       command: sanitize(command).replace(/\s+/g, " ").slice(0, 512),
+      generation: 0,
     };
-    const script = join(d.dir, `${job.id}.sh`);
-    await writeFile(script, command, { mode: 0o600, flag: "wx" });
-    d.jobs.push(job);
-    await this.save();
     try {
-      job.pane = await tm.start(script, cwd, !exists);
-      if (!(await tm.verify())) throw new Error("Server disappeared during startup");
-      await this.save();
-    } catch (e) {
-      if (job.pane && (await this.verified().catch(() => false)))
-        await client(tm.args("kill-pane", "-t", job.pane));
-      d.jobs = d.jobs.filter((x) => x !== job);
-      await this.save();
-      await unlink(script).catch(() => {});
-      throw e;
+      const script = join(dir, "command.sh");
+      await writeFile(script, command, { mode: 0o600, flag: "wx" });
+      const [source, textSource] = await Promise.all([
+        readFile(fileURLToPath(new URL("./capture.mjs", import.meta.url))),
+        readFile(fileURLToPath(new URL("./text.mjs", import.meta.url))),
+      ]);
+      if (source.length > 65536 || textSource.length > 65536)
+        throw new Error("Capture runtime is oversized");
+      const hash = createHash("sha256").update(source).update(textSource).digest("hex");
+      const runtime = join(dir, `capture-${hash}.mjs`);
+      await writeFile(runtime, source, { mode: 0o600, flag: "wx" });
+      await writeFile(join(dir, "text.mjs"), textSource, { mode: 0o600, flag: "wx" });
+      checkActive();
+      persist(ref);
+      this.jobsById.set(job.id, job);
+      const first = !(await this.verified());
+      if (first && this.generation > 0) {
+        for (const existing of this.jobsById.values()) {
+          if (existing === job || existing.generation !== this.generation || !existing.pane)
+            continue;
+          if (["running", "capture_unverified"].includes((await this.status(existing)).state))
+            throw new Error(
+              "Cannot restart an unverified server while a producer may still be running",
+            );
+        }
+      }
+      if (first) this.generation++;
+      job.generation = this.generation;
+      const start = await tm.startCaptured(
+        script,
+        cwd,
+        first,
+        dir,
+        runtime,
+        ref.stream,
+        async (pane, pid) => {
+          job.pid = pid;
+          await writeFile(
+            join(dir, "producer.json"),
+            JSON.stringify({
+              version: 1,
+              stream: ref.stream,
+              socket: tm.socket,
+              token: tm.token,
+              pane,
+              pid,
+            }),
+            { mode: 0o600, flag: "wx" },
+          );
+        },
+        () => !this.closed && active(),
+      );
+      job.pane = start.pane;
+      return {
+        id: job.id,
+        state: "running",
+        launch: start.launch,
+        logRef: ref,
+        socket: tm.socket,
+        attach: `tmux -S ${quote(tm.socket)} attach -t jobs`,
+        note: "Watches are live-session only; logs contain untrusted, potentially sensitive output.",
+      };
+    } catch (error) {
+      if (!this.jobsById.has(job.id)) {
+        await this.storage.remove(ref).catch(() => {});
+        throw error;
+      }
+      // startCaptured only rejects before the gate can release the user script.
+      // A late sink cannot recreate a removed stream directory, so rollback is safe.
+      await writeStopProof(dir, { version: 1, stream: ref.stream, state: "unstarted" }).catch(
+        () => {},
+      );
+      const removed = await this.storage.remove(ref).then(
+        () => true,
+        () => false,
+      );
+      if (removed) {
+        this.jobsById.delete(job.id);
+        throw error;
+      }
+      job.failure = error instanceof Error ? error.message : String(error);
+      return {
+        id: job.id,
+        state: "capture_failed",
+        logRef: ref,
+        error: `${job.failure}; startup rollback failed`,
+        socket: tm.socket,
+        attach: `tmux -S ${quote(tm.socket)} attach -t jobs`,
+      };
     }
-    return {
-      id: job.id,
-      state: "running",
-      socket: tm.socket,
-      attach: `tmux -S ${quote(tm.socket)} attach -t jobs`,
-      note: "Job survives Pi shutdown; explicitly stop it or the server.",
-    };
   }
   async jobs() {
-    await this.load(false);
-    if (!this.data) return [];
-    const available = await this.verified();
-    return Promise.all(
-      this.data.jobs.map(async (j) => ({
-        id: j.id,
-        created: j.created,
-        command: j.command,
-        ...(j.cancelled
-          ? { state: "cancelled" }
-          : available && j.pane
-            ? await this.tm!.status(j.pane)
-            : { state: "lost" }),
-      })),
+    const jobs = [];
+    for (const j of this.jobsById.values())
+      jobs.push({ id: j.id, created: j.created, command: j.command, ...(await this.status(j)) });
+    return jobs;
+  }
+  private async read(ref: LogRef) {
+    const dir = await this.storage.resolve(ref);
+    const page = await readJournalTail(dir, ref.stream);
+    const last = page.frames.at(-1);
+    const end =
+      page.health === "ready" && last?.sequence === page.tail
+        ? completeUtf8Prefix(page.data, page.data.length)
+        : page.data.length;
+    let remaining = page.data.length - end;
+    const pendingUtf8 = remaining > 0;
+    let cursor = { sequence: page.tail, offset: 0 };
+    for (let i = page.frames.length - 1; i >= 0 && remaining > 0; i--) {
+      const f = page.frames[i];
+      if (remaining < f.data.length) {
+        cursor = { sequence: f.sequence, offset: f.data.length - remaining };
+        remaining = 0;
+      } else {
+        remaining -= f.data.length;
+        cursor = { sequence: f.sequence - 1, offset: 0 };
+      }
+    }
+    const firstFrame = page.frames[0];
+    const normalizer = firstFrame
+      ? await this.normalizerAt(
+          dir,
+          ref.stream,
+          { sequence: firstFrame.sequence - 1, offset: 0 },
+          page.first,
+        )
+      : new TextNormalizer();
+    let clipped = page.frames.reduce((sum, f) => sum + f.data.length, 0) - page.data.length;
+    for (const frame of page.frames) {
+      if (clipped <= 0) break;
+      const count = Math.min(clipped, frame.data.length);
+      normalizer.write(frame.data.subarray(0, count));
+      clipped -= count;
+    }
+    let text = normalizer.write(page.data.subarray(0, end));
+    if (page.health !== "ready") text += normalizer.end();
+    const output = bounded(text);
+    output.truncated ||= page.truncated;
+    return {
+      untrustedOutput: output,
+      first: page.first,
+      tail: page.tail,
+      next: cursor,
+      gap: page.gap,
+      captureHealth: page.health,
+      pendingUtf8,
+      parserOverflow: normalizer.overflow,
+      parserUncertain: false,
+    };
+  }
+  private async normalizerAt(
+    dir: string,
+    stream: string,
+    after: LogCursor,
+    expectedFirst?: number,
+  ) {
+    const initial = await journalInfo(dir, stream);
+    if (
+      (expectedFirst !== undefined && initial.first !== expectedFirst) ||
+      after.sequence < initial.first - 1
+    )
+      throw new Error("Journal rotated during inspection; retry");
+    if (initial.first > 1 && !initial.firstText)
+      throw new Error("Retained parser checkpoint unavailable");
+    const normalizer = initial.firstText
+      ? new TextNormalizer(initial.firstText)
+      : new TextNormalizer();
+    let cursor = initial.first - 1;
+    let reached = cursor === after.sequence && after.offset === 0;
+    while (!reached && cursor < after.sequence) {
+      const page = await readJournal(dir, stream, cursor);
+      if (page.first !== initial.first || page.gap)
+        throw new Error("Journal changed during inspection; retry");
+      for (const f of page.frames) {
+        if (f.sequence > after.sequence) break;
+        normalizer.write(
+          f.sequence === after.sequence && after.offset ? f.data.subarray(0, after.offset) : f.data,
+        );
+        if (f.sequence === after.sequence) {
+          reached = true;
+          break;
+        }
+      }
+      if (page.next <= cursor) break;
+      cursor = page.next;
+    }
+    if (!reached || (await journalInfo(dir, stream)).first !== initial.first)
+      throw new Error("Journal changed during inspection; retry");
+    return normalizer;
+  }
+  private async readForward(ref: LogRef, after: LogCursor) {
+    if (
+      !after ||
+      !Number.isSafeInteger(after.sequence) ||
+      after.sequence < 0 ||
+      !Number.isSafeInteger(after.offset) ||
+      after.offset < 0 ||
+      after.offset > 16384 ||
+      (!after.sequence && after.offset)
+    )
+      throw new Error("Invalid journal cursor");
+    const dir = await this.storage.resolve(ref);
+    const page = await readJournal(
+      dir,
+      ref.stream,
+      after.offset ? after.sequence - 1 : after.sequence,
+    );
+    let skip = after.offset;
+    if (skip && page.frames[0]?.sequence !== after.sequence) {
+      if (!page.gap) throw new Error("Journal cursor does not identify a frame");
+      skip = 0;
+    }
+    if (skip && skip >= page.frames[0].data.length) throw new Error("Invalid journal frame offset");
+    const data = Buffer.concat(
+      page.frames.map((f, i) => (i === 0 ? f.data.subarray(skip) : f.data)),
+    );
+    // Malformed bytes can expand to three-byte U+FFFD on UTF-8 rendering.
+    let cut = Math.min(data.length, Math.floor(16384 / 3)),
+      lines = 0;
+    for (let i = 0; i < cut; i++) {
+      // CR is also normalized to a line break; counting CRLF twice is conservative.
+      if ((data[i] === 10 || data[i] === 13) && ++lines === 199) {
+        cut = i + 1;
+        break;
+      }
+    }
+    while (cut > 0 && cut < data.length && (data[cut] & 0xc0) === 0x80) cut--;
+    if (cut === 0 && data.length) cut = Math.min(data.length, Math.floor(16384 / 3));
+    let pendingUtf8 = false;
+    if (cut === data.length && (page.health === "ready" || page.next < page.tail)) {
+      const complete = completeUtf8Prefix(data, cut);
+      pendingUtf8 = complete < cut;
+      cut = complete;
+    }
+    let consumed = cut;
+    let cursor = page.gap
+      ? { sequence: page.frames[0] ? page.frames[0].sequence - 1 : page.next, offset: 0 }
+      : { ...after };
+    for (let i = 0; i < page.frames.length && consumed > 0; i++) {
+      const f = page.frames[i],
+        start = i === 0 ? skip : 0,
+        size = f.data.length - start;
+      if (consumed < size) {
+        cursor = { sequence: f.sequence, offset: start + consumed };
+        consumed = 0;
+      } else {
+        cursor = { sequence: f.sequence, offset: 0 };
+        consumed -= size;
+      }
+    }
+    const more = (cut < data.length && !pendingUtf8) || page.next < page.tail;
+    if (page.gap && page.frames.length && page.frames[0].sequence !== page.first)
+      throw new Error("Parser checkpoint unavailable after journal gap");
+    const start = page.gap ? { sequence: page.first - 1, offset: 0 } : after;
+    const normalizer =
+      page.gap && !page.frames.length
+        ? new TextNormalizer()
+        : await this.normalizerAt(dir, ref.stream, start, page.first);
+    let text = normalizer.write(data.subarray(0, cut));
+    if (!more && !pendingUtf8 && page.health !== "ready") text += normalizer.end();
+    return {
+      untrustedOutput: { text, truncated: more },
+      first: page.first,
+      tail: page.tail,
+      next: cursor,
+      gap: page.gap,
+      captureHealth: page.health,
+      pendingUtf8,
+      parserOverflow: normalizer.overflow,
+      parserUncertain: page.gap && !page.frames.length,
+    };
+  }
+  async watchStart(jobId: string, from: "now" | "retained", exit = false) {
+    const job = this.find(jobId);
+    const dir = await this.storage.resolve(job.ref);
+    const info = await journalInfo(dir, job.ref.stream);
+    if (exit)
+      return {
+        stream: job.ref.stream,
+        cursor: info.tail,
+        normalizer: new TextNormalizer(),
+        skipPartial: false,
+        gap: false,
+        prefixMissing: false,
+      };
+    if (from === "now") {
+      const normalizer = info.tailText
+        ? new TextNormalizer(info.tailText)
+        : await this.normalizerAt(dir, job.ref.stream, { sequence: info.tail, offset: 0 });
+      return {
+        stream: job.ref.stream,
+        cursor: info.tail,
+        normalizer,
+        skipPartial: !normalizer.atLineBoundary || !!normalizer.snapshot().pending,
+        gap: info.first > 1 && !info.tailText && !info.firstText,
+        prefixMissing: false,
+      };
+    }
+    const normalizer = info.firstText ? new TextNormalizer(info.firstText) : new TextNormalizer();
+    return {
+      stream: job.ref.stream,
+      cursor: info.first - 1,
+      normalizer,
+      skipPartial:
+        info.first > 1 && (!normalizer.atLineBoundary || !!normalizer.snapshot().pending),
+      gap: info.first > 1 && !info.firstText,
+      prefixMissing: info.first > 1,
+    };
+  }
+  async watchBoundary(jobId: string, stream: string) {
+    const job = this.find(jobId);
+    if (job.ref.stream !== stream) throw new Error("Watch source changed");
+    return journalBoundary(await this.storage.resolve(job.ref), stream);
+  }
+  async watchStatus(jobId: string, stream: string) {
+    const job = this.find(jobId);
+    if (job.ref.stream !== stream) throw new Error("Watch source changed");
+    const info = await journalInfo(await this.storage.resolve(job.ref), stream);
+    return {
+      first: info.first,
+      tail: info.tail,
+      next: info.tail,
+      health: info.health,
+      firstText: info.firstText,
+      gap: false,
+      frames: [],
+      status: await this.status(job),
+    };
+  }
+  async watchRead(jobId: string, stream: string, after: number) {
+    const job = this.find(jobId);
+    if (job.ref.stream !== stream) throw new Error("Watch source changed");
+    const page = await readJournal(await this.storage.resolve(job.ref), stream, after);
+    return { ...page, status: await this.status(job) };
+  }
+  async inspect(jobId: string, after?: LogCursor) {
+    const job = this.find(jobId);
+    return {
+      id: job.id,
+      ...(await this.status(job)),
+      timestamp: new Date().toISOString(),
+      ...(after ? await this.readForward(job.ref, after) : await this.read(job.ref)),
+      logRef: job.ref,
+    };
+  }
+  async inspectHistorical(ref: LogRef, after?: LogCursor) {
+    const dir = await this.storage.resolve(ref);
+    const proof = await readStopProof(dir, ref.stream).catch(() => undefined);
+    const pending = !!getStopEvidence(dir)?.confirmed;
+    return {
+      historical: true,
+      state: pending ? "unknown" : (proof?.state ?? "unknown"),
+      proofIncomplete: pending,
+      ...(!pending && proof?.exitCode !== undefined ? { exitCode: proof.exitCode } : {}),
+      ...(!pending && proof?.signal ? { signal: proof.signal } : {}),
+      ...(after ? await this.readForward(ref, after) : await this.read(ref)),
+      logRef: ref,
+    };
+  }
+  private async publishProof(job: Job, proof: StopProof) {
+    job.pendingProof = proof;
+    try {
+      const evidence = rememberStopEvidence(job.dir, proof, true);
+      job.pendingProof = undefined; // The process-wide evidence owns retry from here.
+      await boundedIo(() => writeStopEvidence(job.dir, evidence), 1000);
+      clearStopEvidence(job.dir, evidence);
+      if (job.pendingProof === proof) job.pendingProof = undefined;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  async stop(jobId: string, active = () => true) {
+    const job = this.find(jobId);
+    const tm = this.tm;
+    const current = await this.status(job);
+    if (!["running", "capture_unverified"].includes(current.state))
+      return { id: job.id, state: job.cancelled ? "cancelled" : "not-running" };
+    if (
+      !job.pane ||
+      !job.pid ||
+      !tm ||
+      job.generation !== this.generation ||
+      !(await this.verified())
+    )
+      throw new Error("Cannot verify producer before stopping");
+    await tm.sourceOperation(job.pane, job.ref.stream, job.pid, "running", "interrupt", active);
+    await new Promise((r) => setTimeout(r, 2000));
+    const observed = await tm
+      .sourceStatus(job.pane, job.ref.stream, job.pid)
+      .catch(() => undefined);
+    let confirmed = false;
+    if (observed?.state === "running" || observed?.state === "exited") {
+      await tm.sourceOperation(job.pane, job.ref.stream, job.pid, observed.state, "kill", active);
+      confirmed = true;
+      tm.cancelCaptureSupervisor(job.pane);
+    } else if (observed?.state === "changed") {
+      throw new Error("Producer identity changed; refusing to stop replacement");
+    }
+    if (!confirmed) await tm.waitCapture(job.pane).catch(() => {});
+    const prior = await readStopProof(job.dir, job.ref.stream).catch(() => undefined);
+    confirmed ||= !!prior && prior.state !== "unstarted";
+    if (!confirmed)
+      return {
+        id: job.id,
+        state: "capture_unverified",
+        error: "Producer stop could not be verified",
+      };
+    job.cancelled = true;
+    job.final = { state: "cancelled", capture: "draining" };
+    const written = await this.publishProof(job, {
+      version: 1,
+      stream: job.ref.stream,
+      state: "cancelled",
+      exitCode: observed?.state === "exited" ? observed.exitCode : prior?.exitCode,
+      signal: observed?.state === "exited" ? observed.signal : prior?.signal,
+    });
+    job.final.proofIncomplete = !written;
+    job.final.capture = await this.drainCapture(job, Date.now() + 5000);
+    return {
+      id: job.id,
+      state: "cancelled",
+      capture: job.final.capture,
+      proofIncomplete: !written,
+    };
+  }
+  private async reclaimDeadPane(ref: LogRef, dir: string, active: () => boolean) {
+    const producer = JSON.parse(
+      (await readPrivateFile(join(dir, "producer.json"), 4096)).toString("utf8"),
+    );
+    if (
+      producer.version !== 1 ||
+      producer.stream !== ref.stream ||
+      typeof producer.socket !== "string" ||
+      !/^\/tmp\/pbm-[A-Za-z0-9]{6}\/s$/.test(producer.socket) ||
+      typeof producer.token !== "string" ||
+      !/^[a-f0-9]{48}$/.test(producer.token) ||
+      typeof producer.pane !== "string" ||
+      !/^%\d+$/.test(producer.pane) ||
+      !Number.isSafeInteger(producer.pid) ||
+      producer.pid < 1
+    )
+      throw new Error("Invalid producer identity");
+    const ownerDir = dirname(producer.socket);
+    const owner = await lstat(ownerDir);
+    const socket = await lstat(producer.socket);
+    if (
+      !owner.isDirectory() ||
+      owner.isSymbolicLink() ||
+      owner.uid !== process.getuid?.() ||
+      owner.mode & 0o077 ||
+      !socket.isSocket() ||
+      socket.uid !== process.getuid?.()
+    )
+      throw new Error("Unsafe producer socket");
+    const tm = new Tmux(producer.socket, ownerDir, producer.token);
+    if (!(await tm.verify())) throw new Error("Producer server is unavailable");
+    const status = await tm.sourceStatus(producer.pane, ref.stream, producer.pid);
+    if (status.state !== "exited") throw new Error("Producer is not a verified dead pane");
+    if (getStopEvidence(dir))
+      throw new Error("Stop evidence is already being recorded; retry later");
+    const entry = rememberStopEvidence(
+      dir,
+      {
+        version: 1,
+        stream: ref.stream,
+        state: "exited",
+        exitCode: status.exitCode,
+        signal: status.signal,
+      },
+      false,
+    );
+    try {
+      await tm.sourceOperation(producer.pane, ref.stream, producer.pid, "exited", "kill", active);
+      entry.confirmed = true;
+      await boundedIo(() => writeStopEvidence(dir, entry), 1000);
+      clearStopEvidence(dir, entry);
+    } catch (error) {
+      if (!entry.confirmed) clearStopEvidence(dir, entry);
+      throw error;
+    }
+  }
+  private async verifyCaptureClosed(ref: LogRef, dir: string, active: () => boolean) {
+    const evidence = getStopEvidence(dir);
+    if (evidence) {
+      if (!evidence.confirmed)
+        throw new Error("Stop evidence is still being recorded; retry later");
+      if (!active()) throw new Error("Session closed before proof retry");
+      await boundedIo(() => writeStopEvidence(dir, evidence), 1000);
+      clearStopEvidence(dir, evidence);
+    }
+    let proof = await readStopProof(dir, ref.stream).catch(() => undefined);
+    if (!proof) {
+      await this.reclaimDeadPane(ref, dir, active).catch(() => {
+        if (!active()) throw new Error("Session closed before producer reclamation");
+        throw new Error("Producer stop is unverified; cannot safely delete this source");
+      });
+      proof = await readStopProof(dir, ref.stream);
+    }
+    if (proof.state === "unstarted") return;
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      const metadata = await boundedIo(
+        () => readPrivateFile(join(dir, "capture.json"), 4096),
+        Math.max(1, deadline - Date.now()),
+      ).catch(() => undefined);
+      if (!metadata) break;
+      const capture = JSON.parse(metadata.toString("utf8"));
+      if (capture.version !== 1 || capture.stream !== ref.stream) break;
+      if (["complete", "failed"].includes(capture.health)) return;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    throw new Error("Capture completion cannot be verified; refuse cleanup");
+  }
+  hasSource(jobId: string, stream: string) {
+    return this.jobsById.get(jobId)?.ref.stream === stream;
+  }
+  hasRef(ref: LogRef) {
+    return [...this.jobsById.values()].some(
+      (job) => job.ref.owner === ref.owner && job.ref.stream === ref.stream,
     );
   }
-  async inspect(jobId: string) {
-    await this.load(false);
-    const j = this.find(jobId);
-    if (j.cancelled)
-      return {
-        id: j.id,
-        state: "cancelled",
-        timestamp: new Date().toISOString(),
-        untrustedOutput: j.finalOutput ?? { text: "", truncated: false },
-        clientTruncated: false,
-      };
-    if (!j.pane || !(await this.verified())) return { id: j.id, state: "lost" };
-    const status = await this.tm!.status(j.pane);
-    if (status.state === "lost") return { id: j.id, ...status };
-    try {
-      const r = await this.tm!.capture(j.pane);
-      return {
-        id: j.id,
-        ...status,
-        timestamp: new Date().toISOString(),
-        untrustedOutput: bounded(r.stdout),
-        clientTruncated: r.truncated,
-      };
-    } catch (e) {
-      if ((await this.tm!.status(j.pane)).state === "lost") return { id: j.id, state: "lost" };
-      throw e;
-    }
+  async deleteHistorical(ref: LogRef, active = () => true) {
+    const dir = await this.storage.resolve(ref);
+    await this.verifyCaptureClosed(ref, dir, active);
+    await this.storage.remove(ref, active);
+    return { deleted: true };
   }
-  async stop(jobId: string) {
-    await this.load(false);
-    const j = this.find(jobId);
-    if (j.pane && (await this.verified()) && (await this.tm!.status(j.pane)).state === "running") {
-      try {
-        j.finalOutput = bounded((await this.tm!.capture(j.pane)).stdout);
-      } catch {
-        /* pane may exit during cancellation */
-      }
-      await checked(this.tm!.args("send-keys", "-t", j.pane, "C-c"));
-      await new Promise((r) => setTimeout(r, 2000));
-      if ((await this.tm!.status(j.pane)).state === "running")
-        await client(this.tm!.args("kill-pane", "-t", j.pane));
-      j.cancelled = true;
-      await this.save();
-    }
-    return { id: j.id, state: j.cancelled ? "cancelled" : "not-running" };
-  }
-  async forget(jobId: string) {
-    await this.load(false);
-    const j = this.find(jobId);
-    if (j.pane && (await this.verified())) {
-      if ((await this.tm!.status(j.pane)).state === "running")
-        throw new Error("Stop running job before forgetting it");
-      await client(this.tm!.args("kill-pane", "-t", j.pane));
-    }
-    this.data!.jobs = this.data!.jobs.filter((x) => x !== j);
-    await this.save();
-    await unlink(join(this.data!.dir, `${j.id}.sh`)).catch(() => {});
+  async forget(jobId: string, active = () => true) {
+    const job = this.find(jobId);
+    const status = await this.status(job);
+    if (status.state === "running") throw new Error("Cannot forget a running capture source");
+    if (job.pane && job.generation === this.generation) await this.tm?.waitCapture(job.pane);
+    const pending =
+      job.pendingProof ??
+      (this.tm?.captureResult(job.dir) as { pendingProof?: StopProof } | undefined)?.pendingProof;
+    if (pending && !getStopEvidence(job.dir)) rememberStopEvidence(job.dir, pending, true);
+    await this.verifyCaptureClosed(job.ref, job.dir, active);
+    await this.storage.remove(job.ref, active);
+    this.jobsById.delete(job.id);
+    this.tm?.forgetCaptureResult(job.dir);
     return { forgotten: jobId };
   }
-  async serverStop() {
-    await this.load(false);
-    if (!this.data) return { stopped: false };
-    if (await this.verified()) await checked(this.tm!.args("kill-server"));
-    const dir = this.data.dir;
-    this.data = undefined;
+  private async drainCapture(job: Job, deadline: number) {
+    while (Date.now() < deadline) {
+      try {
+        const metadata = await boundedIo(
+          () => readPrivateFile(join(job.dir, "capture.json"), 4096),
+          Math.max(1, deadline - Date.now()),
+        );
+        const state = JSON.parse(metadata.toString("utf8"));
+        if (state.version !== 1 || state.stream !== job.ref.stream) return "incomplete";
+        if (state.health === "complete" || state.health === "failed") return state.health;
+      } catch {
+        return "incomplete";
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return "incomplete";
+  }
+  async serverStop(active = () => true) {
+    if (!this.tm) return { stopped: false };
+    const states = [];
+    for (const job of this.jobsById.values()) states.push({ job, status: await this.status(job) });
+    const ownedServerStopped = await this.verified().catch(() => false);
+    if (!ownedServerStopped)
+      return {
+        stopped: false,
+        unverified: true,
+        error: "Cannot verify the owned server; no stop was issued",
+      };
+    if (!active()) throw new Error("Session closed before server control");
+    await checked(this.tm.args("kill-server"));
+    this.tm.stopCaptureSupervisors();
+    const proofWrites: boolean[] = [];
+    for (const { job, status } of states) {
+      if (!job.pane || job.generation !== this.generation) {
+        proofWrites.push(true);
+        continue;
+      }
+      const state =
+        status.state === "exited"
+          ? "exited"
+          : status.state === "capture_failed"
+            ? "capture_failed"
+            : status.state === "running" ||
+                status.state === "capture_unverified" ||
+                status.state === "cancelled"
+              ? "cancelled"
+              : "lost";
+      const ok = await this.publishProof(job, {
+        version: 1,
+        stream: job.ref.stream,
+        state,
+        exitCode: status.exitCode,
+        signal: status.signal,
+      });
+      proofWrites.push(ok);
+    }
+    const deadline = Date.now() + 5000;
+    const captures: string[] = [];
+    for (const { job, status } of states)
+      captures.push(
+        status.capture === "complete" || status.capture === "failed"
+          ? status.capture
+          : await this.drainCapture(job, deadline),
+      );
+    for (let i = 0; i < states.length; i++) {
+      const { job, status } = states[i];
+      if (status.state === "running" || status.state === "capture_unverified") job.cancelled = true;
+      job.final = {
+        ...status,
+        state: job.cancelled ? "cancelled" : status.state,
+        capture: captures[i],
+        proofIncomplete: !proofWrites[i],
+      };
+    }
+    const dir = this.dir;
     this.tm = undefined;
-    this.locked = false;
-    await rm(dir, { recursive: true, force: true });
-    this.persist(null);
-    return { stopped: true };
+    this.dir = undefined;
+    this.generation++;
+    if (dir) await rm(dir, { recursive: true, force: true });
+    return {
+      stopped: true,
+      logsRetained: true,
+      incomplete: captures.filter((x) => x !== "complete").length,
+      proofIncomplete: proofWrites.filter((ok) => !ok).length,
+    };
   }
 }

@@ -1,49 +1,25 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { type Binding, broker, type Delivery } from "./broker.ts";
+import { type Binding, broker } from "./broker.ts";
+import { LiveInbox } from "./delivery.ts";
 import { DEFAULT_LIMITS, dashboard, type Limits, validLimits } from "./ui.ts";
 
-const ENTRY = "pi-background-monitor:locator:v1";
+const ENTRY = "pi-background-monitor:logref:v2";
 const SETTINGS = "pi-background-monitor:settings:v1";
+const LOG_REF = Type.Object({
+  version: Type.Literal(1),
+  session: Type.String(),
+  owner: Type.String(),
+  stream: Type.String(),
+  slot: Type.Integer(),
+});
 export default function extension(pi: ExtensionAPI) {
   let binding: Binding | undefined;
   const dashboards = new Set<AbortController>();
   let limits: Limits = { ...DEFAULT_LIMITS };
-  let pending: { text: string; delivery: Delivery }[] = [];
-  let dropped = 0;
-  let lastMessage = 0;
-  let flushTimer: ReturnType<typeof setTimeout> | undefined;
-  function flush(current: Binding) {
-    flushTimer = undefined;
-    if (!current.active || binding !== current || !pending.length) return;
-    const delay = 10000 - (Date.now() - lastMessage);
-    if (delay > 0) {
-      flushTimer = setTimeout(() => flush(current), delay);
-      flushTimer.unref();
-      return;
-    }
-    const batch = pending.splice(0),
-      extra = dropped;
-    dropped = 0;
-    lastMessage = Date.now();
-    try {
-      pi.sendMessage(
-        {
-          customType: "pi-background-monitor:event",
-          content: (
-            batch.map((x) => x.text).join("\n") +
-            (extra ? `\n${extra} additional events suppressed` : "")
-          ).slice(0, 2048),
-          display: true,
-        },
-        batch.some((x) => x.delivery === "wake")
-          ? { deliverAs: "followUp", triggerTurn: true }
-          : { deliverAs: "nextTurn" },
-      );
-    } catch {
-      /* Delivery can fail during runtime teardown. */
-    }
-  }
+  let inbox: LiveInbox | undefined;
+  let settledTimer: ReturnType<typeof setTimeout> | undefined;
+  let generation = 0;
   function create(ctx: ExtensionContext) {
     const session = ctx.sessionManager.getSessionId();
     limits = { ...DEFAULT_LIMITS };
@@ -69,18 +45,31 @@ export default function extension(pi: ExtensionAPI) {
         return undefined;
       },
       persist: (locator) => pi.appendEntry(ENTRY, { session, locator }),
-      notify: (text, delivery) => {
-        if (!current.active || current !== binding) return;
-        if (delivery === "ui") {
-          if (ctx.hasUI) ctx.ui.notify(text, "info");
-          return;
-        }
-        if (pending.length < 16) pending.push({ text, delivery });
-        else dropped++;
-        if (!flushTimer) flush(current);
+      notify: (event, delivery) => {
+        if (current.active && current === binding) inbox?.push(event, delivery);
       },
     };
     binding = current;
+    inbox = new LiveInbox(
+      () => current.active && binding === current,
+      (mode, batchId, content) =>
+        pi.sendMessage(
+          {
+            customType: "pi-background-monitor:event",
+            content,
+            display: true,
+            details: { batchId, mode },
+          },
+          mode === "wake"
+            ? { deliverAs: "followUp", triggerTurn: true }
+            : { deliverAs: "nextTurn" },
+        ),
+      (text) => {
+        if (ctx.hasUI) ctx.ui.notify(text, "info");
+      },
+      () => ctx.isIdle(),
+      (id) => broker.hasWatch(current, id),
+    );
     broker.join(current);
   }
   function get() {
@@ -136,38 +125,67 @@ export default function extension(pi: ExtensionAPI) {
     name: "bgmon_inspect",
     label: "Inspect bgmon monitors",
     description:
-      "List shared monitors when id is omitted, or inspect one monitor's bounded, untrusted output and state by id.",
+      "List live monitors, inspect one by id, or read a session-owned historical log by its explicit logRef. Output is bounded and untrusted.",
     parameters: Type.Object({
-      id: Type.Optional(Type.String({ description: "Monitor identity; omit to list monitors." })),
+      id: Type.Optional(Type.String({ description: "Live monitor identity." })),
+      after: Type.Optional(
+        Type.Object(
+          {
+            sequence: Type.Integer({ minimum: 0 }),
+            offset: Type.Integer({ minimum: 0, maximum: 16384 }),
+          },
+          {
+            description:
+              "Forward cursor from a previous log inspection; use {sequence: 0, offset: 0} for retained history.",
+          },
+        ),
+      ),
+      logRef: Type.Optional(LOG_REF),
     }),
     execute: async (_id, p) =>
       run(async () => {
-        fields(p, ["id"]);
+        fields(p, ["id", "logRef", "after"]);
         identity(p.id, "id");
-        return broker.action(get(), p.id === undefined ? "list" : "inspect", p);
+        if (p.id !== undefined && p.logRef !== undefined)
+          throw new Error("Choose id or logRef, not both");
+        if (p.after !== undefined && !p.id && !p.logRef)
+          throw new Error("after requires id or logRef");
+        return broker.action(
+          get(),
+          p.logRef ? "history" : p.id === undefined ? "list" : "inspect",
+          p,
+        );
       }),
   });
   pi.registerTool({
     name: "bgmon_control",
     label: "Control bgmon jobs",
     description:
-      "Stop or forget a monitor by id. server_stop stops ALL jobs in that monitor's owning server, or your session's server when id is omitted.",
+      "Stop or forget an indexed monitor by id; server_stop stops its owning server but retains logs. delete_history deletes a completed session-owned log by logRef.",
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal("stop"),
         Type.Literal("forget"),
         Type.Literal("server_stop"),
+        Type.Literal("delete_history"),
       ]),
       id: Type.Optional(
-        Type.String({ description: "Monitor identity; required except for server_stop." }),
+        Type.String({ description: "Monitor identity; required for stop or forget." }),
       ),
+      logRef: Type.Optional(LOG_REF),
     }),
     execute: async (_id, p) =>
       run(async () => {
-        fields(p, ["action", "id"]);
-        if (!["stop", "forget", "server_stop"].includes(p.action))
+        fields(p, ["action", "id", "logRef"]);
+        if (!["stop", "forget", "server_stop", "delete_history"].includes(p.action))
           throw new Error("Invalid control action");
-        identity(p.id, "id", p.action !== "server_stop");
+        if (p.action === "delete_history") {
+          if (!p.logRef || p.id !== undefined)
+            throw new Error("delete_history requires only logRef");
+        } else {
+          if (p.logRef !== undefined) throw new Error("logRef is only valid for delete_history");
+          identity(p.id, "id", p.action !== "server_stop");
+        }
         return broker.action(get(), p.action, p);
       }),
   });
@@ -175,7 +193,7 @@ export default function extension(pi: ExtensionAPI) {
     name: "bgmon_watch",
     label: "Manage bgmon watches",
     description:
-      "Manage snapshot watches: add needs monitorId and kind; update/remove need watchId; list takes no other arguments. contains matches literal text; regex uses JavaScript pattern source without /delimiters/ and optional imsu flags. Failed regex watches are removed with a notice. Updates cannot change monitorId, kind, pattern or flags. Snapshots can miss output; wake may start a model turn.",
+      "Watch completed journal lines or job exit in this live session. Filters are any, literal contains, or JavaScript regex; from selects now or retained output. nextTurn waits for a user- or custom-started run; wake may start a run when idle. Submission remains unconfirmed until observed and may never be confirmed.",
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal("add"),
@@ -190,9 +208,9 @@ export default function extension(pi: ExtensionAPI) {
       kind: Type.Optional(
         Type.Union(
           [
+            Type.Literal("any"),
             Type.Literal("contains"),
             Type.Literal("regex"),
-            Type.Literal("changed"),
             Type.Literal("exit"),
           ],
           {
@@ -208,8 +226,12 @@ export default function extension(pi: ExtensionAPI) {
       ),
       flags: Type.Optional(
         Type.String({
-          description:
-            "Regex only: unique i, m, s, u flags, default none. m makes anchors line-based; s lets dot match newlines. g and y are not supported.",
+          description: "Regex only: unique i and u flags; matching is per completed line.",
+        }),
+      ),
+      from: Type.Optional(
+        Type.Union([Type.Literal("now"), Type.Literal("retained")], {
+          description: "Start at the current published tail (default), or scan retained output.",
         }),
       ),
       label: Type.Optional(
@@ -220,36 +242,28 @@ export default function extension(pi: ExtensionAPI) {
           description: "Default ui; wake can start a model turn.",
         }),
       ),
-      intervalSeconds: Type.Optional(
-        Type.Number({
-          description: "Polling interval 1–300 seconds; default 5. Update reschedules.",
-        }),
-      ),
       ttlSeconds: Type.Optional(
         Type.Number({
-          description: "Lifetime 1–1800 seconds; default 300. Update renews from now.",
+          description: "Optional lifetime 1–604800 seconds; update renews from now.",
         }),
       ),
       once: Type.Optional(
         Type.Boolean({
-          description:
-            "Remove on first match; default true. Repeats require a transition and 10-second cooldown.",
+          description: "Stop on first matching line by default; false counts every matching line.",
         }),
       ),
     }),
     execute: async (_id, p) =>
       run(async () => {
-        const options = ["label", "delivery", "intervalSeconds", "ttlSeconds", "once"];
+        const options = ["label", "delivery", "ttlSeconds", "once"];
         switch (p.action) {
           case "add":
-            fields(p, ["action", "monitorId", "kind", "pattern", "flags", ...options]);
+            fields(p, ["action", "monitorId", "kind", "pattern", "flags", "from", ...options]);
             identity(p.monitorId, "monitorId", true);
-            if (!p.kind || !["contains", "regex", "changed", "exit"].includes(p.kind))
+            if (!p.kind || !["any", "contains", "regex", "exit"].includes(p.kind))
               throw new Error("add requires a valid kind");
             if (p.kind !== "contains" && p.kind !== "regex" && p.pattern !== undefined)
               throw new Error("pattern is only valid for contains or regex");
-            if (p.kind === "regex" && !broker.regexWatchVersion)
-              throw new Error("Restart Pi to activate regex watches");
             return broker.action(get(), "watch", { ...p, id: p.monitorId });
           case "list":
             fields(p, ["action"]);
@@ -267,6 +281,32 @@ export default function extension(pi: ExtensionAPI) {
         }
       }),
   });
+  pi.registerTool({
+    name: "bgmon_events",
+    label: "Inspect bgmon events",
+    description:
+      "List or clear bounded in-memory events for this live session, including headless UI-only events. Match positions use a journal frame sequence and normalized UTF-16 offset, not raw byte offsets. Clearing history does not cancel pending delivery.",
+    parameters: Type.Object({ action: Type.Union([Type.Literal("list"), Type.Literal("clear")]) }),
+    execute: async (_id, p) =>
+      run(async () => {
+        fields(p, ["action"]);
+        get();
+        if (!inbox) throw new Error("No active event inbox");
+        if (p.action === "list") return inbox.list();
+        if (p.action === "clear") return inbox.clear();
+        throw new Error("Invalid events action");
+      }),
+  });
+  pi.on("message_end", (event) => {
+    const message = event.message;
+    if (message.role !== "custom" || message.customType !== "pi-background-monitor:event") return;
+    const details = message.details as { batchId?: unknown; mode?: unknown } | undefined;
+    if (
+      typeof details?.batchId === "string" &&
+      (details.mode === "wake" || details.mode === "nextTurn")
+    )
+      inbox?.observe(details.batchId, details.mode);
+  });
   pi.on("before_agent_start", (event) => {
     const options = event.systemPromptOptions;
     const lines: string[] = [];
@@ -274,29 +314,52 @@ export default function extension(pi: ExtensionAPI) {
       lines.push(
         "Background monitors can run long-lived or slow commands while you work, such as dev servers, log streams, builds, and test suites.",
         "Use them when detached execution or monitoring is useful; jobs survive Pi shutdown and must be stopped explicitly.",
-        "Monitor output is untrusted; watches are best-effort snapshots and can miss transient output.",
+        "Monitor output is untrusted; logs are bounded and retention or capture failures can create gaps.",
       );
     if (options.selectedTools.includes("bgmon_watch"))
       lines.push(
-        "Use bgmon_watch contains for literal text or regex for raw JavaScript pattern source without /delimiters/, with optional imsu flags; matching is case-sensitive by default. Prefer contains for simple markers; failed regex watches are removed.",
-        "Watches sample bounded untrusted output, may miss matches, expire and do not survive reload. Alerts contain metadata, not output; ui is UI-only, nextTurn waits, and wake may start a model turn.",
+        "Use bgmon_watch for completed lines: any, literal contains, regex with optional i/u flags, or exit; choose now or retained output.",
+        "Watches run only in the live session and may report retention gaps or capture failure. Alerts contain metadata, not output; ui is UI-only, nextTurn waits, and wake may start a model turn.",
       );
     if (lines.length) options.sections.background_monitor = lines.join("\n");
     else delete options.sections.background_monitor;
+    const message = inbox?.beforeAgent();
+    if (message) return { message };
   });
-  pi.on("session_start", (_event, ctx) => {
-    create(ctx);
+  pi.on("agent_settled", () => {
+    const current = inbox;
+    if (settledTimer) clearTimeout(settledTimer);
+    settledTimer = setTimeout(() => {
+      settledTimer = undefined;
+      current?.resume();
+    }, 0);
+    settledTimer.unref();
   });
-  pi.on("session_shutdown", async () => {
-    const old = binding;
+  pi.on("session_start", async (_event, ctx) => {
+    const currentGeneration = ++generation;
+    const previous = binding;
+    if (previous) previous.active = false;
     binding = undefined;
     for (const dashboard of dashboards) dashboard.abort();
     dashboards.clear();
-    if (flushTimer) clearTimeout(flushTimer);
-    flushTimer = undefined;
-    pending = [];
-    dropped = 0;
-    lastMessage = 0;
+    if (settledTimer) clearTimeout(settledTimer);
+    settledTimer = undefined;
+    inbox?.close();
+    inbox = undefined;
+    if (previous) await broker.leave(previous);
+    if (generation === currentGeneration) create(ctx);
+  });
+  pi.on("session_shutdown", async () => {
+    generation++;
+    const old = binding;
+    if (old) old.active = false;
+    binding = undefined;
+    for (const dashboard of dashboards) dashboard.abort();
+    dashboards.clear();
+    if (settledTimer) clearTimeout(settledTimer);
+    settledTimer = undefined;
+    inbox?.close();
+    inbox = undefined;
     if (old) await broker.leave(old);
   });
   pi.registerCommand("bgmon", {
@@ -317,23 +380,26 @@ export default function extension(pi: ExtensionAPI) {
         ctx.ui.notify("/bgmon settings requires TUI mode", "error");
         return;
       }
+      const current = get();
       if (command === "stop-server") {
-        const r = await run(() => broker.action(get(), "server_stop", {}));
-        ctx.ui.notify(r.content[0].text, "info");
+        const r = await run(() => broker.action(current, "server_stop", {}));
+        if (current.active && binding === current) ctx.ui.notify(r.content[0].text, "info");
         return;
       }
-      const r = await run(() => broker.action(get(), "list", {}));
+      const r = await run(() => broker.action(current, "list", {}));
+      if (!current.active || binding !== current) return;
       if (!ctx.hasUI || ctx.mode !== "tui") {
         ctx.ui.notify(r.content[0].text, "info");
         return;
       }
-      const w = await run(() => broker.action(get(), "watches", {}));
+      const w = await run(() => broker.action(current, "watches", {}));
+      if (!current.active || binding !== current) return;
       const listError = !Array.isArray(r.details)
         ? r.content[0].text
         : !Array.isArray(w.details)
           ? w.content[0].text
           : undefined;
-      const current = get();
+      const currentInbox = inbox;
       const controller = new AbortController();
       dashboards.add(controller);
       try {
@@ -349,7 +415,12 @@ export default function extension(pi: ExtensionAPI) {
           },
           command === "settings" ? "settings" : "list",
           listError,
-          { inspect: (id) => broker.action(current, "inspect", { id }), signal: controller.signal },
+          {
+            inspect: (id) => broker.action(current, "inspect", { id }),
+            signal: controller.signal,
+            eventStatus: () =>
+              currentInbox?.status() ?? { events: 0, coalesced: 0, queued: 0, inFlight: 0 },
+          },
         );
       } finally {
         dashboards.delete(controller);
