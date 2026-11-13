@@ -28,7 +28,7 @@ type Viewer = {
   signal: AbortSignal;
   eventStatus?: () => { events: number; coalesced: number; queued: number; inFlight: number };
 };
-type Job = { id: string; state: string; command?: string };
+type Job = { id: string; state: string; command?: string; origin?: string };
 type Watch = {
   job: string;
   kind: string;
@@ -273,7 +273,7 @@ export async function dashboard(
                   theme.fg("accent", theme.bold("Settings")),
                   theme.fg(
                     "muted",
-                    `Session limits (1–${MAX_MONITORS}); lowering never removes jobs.`,
+                    `Limits shared with subagents (1–${MAX_MONITORS}); lowering never removes jobs.`,
                   ),
                 ]),
             ...fields.flatMap((field, i) => [
@@ -307,12 +307,14 @@ export async function dashboard(
         if (listError) lines.push(theme.fg("error", safe(listError)));
         else if (!jobs.length) lines.push("No monitors yet. Start one with bgmon_start.");
         else {
-          lines.push(theme.fg("muted", "  STATUS     ID                        COMMAND"));
+          lines.push(
+            theme.fg("muted", "  STATUS     ID                        ORIGIN             COMMAND"),
+          );
           const capacity = Math.max(1, (tui.terminal.rows || 24) - 17);
           const start = Math.max(0, Math.min(selected - capacity + 1, jobs.length - capacity));
           for (let i = start; i < Math.min(jobs.length, start + capacity); i++) {
             const job = jobs[i];
-            const row = `${i === selected ? "›" : " "} ${safe(job.state).padEnd(10)} ${safe(job.id).padEnd(25)} ${safe(job.command || "(command unavailable)")}`;
+            const row = `${i === selected ? "›" : " "} ${safe(job.state).padEnd(10)} ${safe(job.id).padEnd(25)} ${safe(job.origin || "unknown").padEnd(18)} ${safe(job.command || "(command unavailable)")}`;
             lines.push(i === selected ? theme.fg("accent", row) : row);
           }
           const job = jobs[selected];
@@ -320,6 +322,7 @@ export async function dashboard(
           lines.push(
             "",
             theme.fg("accent", "Selected monitor"),
+            `Origin: ${safe(job.origin || "unknown")}`,
             `Command: ${safe(job.command || "(unavailable for older monitors)")}`,
           );
           if (!own.length) lines.push("Watches: none for this session");

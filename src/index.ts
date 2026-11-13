@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import { type Binding, broker } from "./broker.ts";
 import { LiveInbox } from "./delivery.ts";
+import { readSubagentIdentity } from "./identity.ts";
 import { DEFAULT_LIMITS, dashboard, type Limits, validLimits } from "./ui.ts";
 
 const ENTRY = "pi-background-monitor:logref:v2";
@@ -31,6 +32,11 @@ export default function extension(pi: ExtensionAPI) {
     }
     const current: Binding = {
       session,
+      identity: readSubagentIdentity(ctx.sessionManager.getEntries()) ?? {
+        group: session,
+        origin: "/root",
+        role: "root",
+      },
       limits: () => limits,
       active: true,
       locate: () => {

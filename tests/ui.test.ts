@@ -210,3 +210,35 @@ test("lost and empty snapshots remain usable at narrow and resized dimensions", 
   component.handleInput("tui.select.cancel");
   assert.equal(closed, true);
 });
+
+test("monitor dashboard renders origin and shared limits copy", async () => {
+  let component: any;
+  const ctx: any = {
+    ui: {
+      custom: async (factory: any) => {
+        component = factory(
+          { terminal: { rows: 30 }, requestRender() {} },
+          {
+            fg: (_: string, value: string) => value,
+            bg: (_: string, value: string) => value,
+            bold: (value: string) => value,
+          },
+          { matches: (data: string, key: string) => data === key },
+          () => {},
+        );
+      },
+    },
+  };
+  await dashboard(
+    ctx,
+    [{ id: "job", state: "running", origin: "/root/child", command: "echo hi" }],
+    [],
+    DEFAULT_LIMITS,
+    () => {},
+  );
+  const list = component.render(100).join("\n");
+  assert.match(list, /ORIGIN/);
+  assert.match(list, /Origin: \/root\/child/);
+  component.handleInput("\t");
+  assert.match(component.render(100).join("\n"), /Limits shared with subagents/);
+});

@@ -1,5 +1,7 @@
 import { randomBytes } from "node:crypto";
+import type { SessionIdentity } from "./identity.ts";
 import type { Frame } from "./journal.ts";
+import { DEFAULT_LIMITS } from "./limits.ts";
 import { type LogCursor, Manager, validId } from "./manager.ts";
 import { sanitize } from "./output.ts";
 import { RegexMatcher } from "./regex.ts";
@@ -27,13 +29,14 @@ export type WatchEvent = {
 };
 type Binding = {
   session: string;
+  identity: SessionIdentity;
   active: boolean;
   locate: () => unknown;
   persist: (x: unknown) => void;
   notify: (event: WatchEvent, delivery: Delivery) => void;
   limits: () => { maxOpen: number; maxTotal: number };
 };
-type Owner = { manager: Manager; binding?: Binding };
+type Owner = { manager: Manager; binding?: Binding; identity: SessionIdentity };
 type Operation<T> = {
   started: number;
   settledAt?: number;
@@ -156,7 +159,11 @@ class Broker {
     let owner = this.owners.get(binding.session);
     if (!owner) {
       if (this.owners.size >= 128) throw new Error("Maximum 128 active monitor owners");
-      owner = { manager: undefined as unknown as Manager, binding };
+      owner = {
+        manager: undefined as unknown as Manager,
+        binding,
+        identity: { ...binding.identity },
+      };
       const ref = owner;
       owner.manager = new Manager(
         binding.session,
@@ -254,12 +261,29 @@ class Broker {
       if (requestedId !== undefined && this.monitors.has(requestedId))
         throw new Error("Duplicate monitor identity");
       if (this.monitors.size >= 64) throw new Error("Maximum 64 shared monitors");
-      const jobs = await owner.manager.run(() => owner.manager.jobs());
-      const limits = binding.limits();
+      const groupOwners = [...this.owners.values()].filter(
+        (candidate) => candidate.identity.group === binding.identity.group,
+      );
+      const jobs = (
+        await Promise.all(
+          groupOwners.map((candidate) => candidate.manager.run(() => candidate.manager.jobs())),
+        )
+      ).flat();
+      const root = [...this.subscribers].find(
+        (candidate) =>
+          candidate.active &&
+          candidate.identity.role === "root" &&
+          candidate.identity.group === binding.identity.group,
+      );
+      const limits = root?.limits() ?? DEFAULT_LIMITS;
       if (jobs.length >= limits.maxTotal)
-        throw new Error(`Maximum ${limits.maxTotal} retained jobs; forget a finished job first`);
+        throw new Error(
+          `Maximum ${limits.maxTotal} retained jobs (shared by /root and its subagents); forget a finished job first`,
+        );
       if (jobs.filter((job) => job.state === "running").length >= limits.maxOpen)
-        throw new Error(`Maximum ${limits.maxOpen} running jobs`);
+        throw new Error(
+          `Maximum ${limits.maxOpen} running jobs (shared by /root and its subagents)`,
+        );
       let jobId = requestedId;
       if (jobId === undefined) {
         do jobId = randomBytes(12).toString("hex");
@@ -307,7 +331,13 @@ class Broker {
         await this.recover(binding);
         const result = [];
         for (const owner of new Set(this.monitors.values()))
-          result.push(...(await owner.manager.run(() => owner.manager.jobs())));
+          result.push(
+            ...(await owner.manager.run(() => owner.manager.jobs())).map((job) => ({
+              ...job,
+              origin: owner.identity.origin,
+              group: owner.identity.group,
+            })),
+          );
         return result;
       }
       if (action === "watches")
@@ -333,7 +363,11 @@ class Broker {
       }
       const owner = this.find(p.id);
       if (action === "inspect")
-        return owner.manager.run(() => owner.manager.inspect(p.id!, p.after));
+        return {
+          ...(await owner.manager.run(() => owner.manager.inspect(p.id!, p.after))),
+          origin: owner.identity.origin,
+          group: owner.identity.group,
+        };
       if (action === "stop")
         return owner.manager.run(() => owner.manager.stop(p.id!, () => binding.active));
       if (action === "forget") {
