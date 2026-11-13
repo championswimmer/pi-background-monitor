@@ -35,7 +35,7 @@ type Binding = {
   notify: (event: WatchEvent, delivery: Delivery) => void;
   limits: () => { maxOpen: number; maxTotal: number };
 };
-type Owner = { manager: Manager; binding?: Binding };
+type Owner = { manager: Manager; binding?: Binding; identity: SessionIdentity };
 type Operation<T> = {
   started: number;
   settledAt?: number;
@@ -158,7 +158,11 @@ class Broker {
     let owner = this.owners.get(binding.session);
     if (!owner) {
       if (this.owners.size >= 128) throw new Error("Maximum 128 active monitor owners");
-      owner = { manager: undefined as unknown as Manager, binding };
+      owner = {
+        manager: undefined as unknown as Manager,
+        binding,
+        identity: { ...binding.identity },
+      };
       const ref = owner;
       owner.manager = new Manager(
         binding.session,
@@ -309,7 +313,13 @@ class Broker {
         await this.recover(binding);
         const result = [];
         for (const owner of new Set(this.monitors.values()))
-          result.push(...(await owner.manager.run(() => owner.manager.jobs())));
+          result.push(
+            ...(await owner.manager.run(() => owner.manager.jobs())).map((job) => ({
+              ...job,
+              origin: owner.identity.origin,
+              group: owner.identity.group,
+            })),
+          );
         return result;
       }
       if (action === "watches")
@@ -335,7 +345,11 @@ class Broker {
       }
       const owner = this.find(p.id);
       if (action === "inspect")
-        return owner.manager.run(() => owner.manager.inspect(p.id!, p.after));
+        return {
+          ...(await owner.manager.run(() => owner.manager.inspect(p.id!, p.after))),
+          origin: owner.identity.origin,
+          group: owner.identity.group,
+        };
       if (action === "stop")
         return owner.manager.run(() => owner.manager.stop(p.id!, () => binding.active));
       if (action === "forget") {

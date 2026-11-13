@@ -2715,3 +2715,39 @@ test("closed bindings cannot forget or delete history after storage verification
     }
   }
 });
+
+test("live monitor origins belong to their creating sessions", async () => {
+  const root = runtime("origin-root");
+  const child = runtime("origin-child", [
+    {
+      type: "custom",
+      customType: "pi-subagent:thread:v1",
+      data: {
+        rootId: "origin-root",
+        threadPath: "/root/child",
+        inheritedCount: 0,
+      },
+    },
+  ]);
+  await root.start();
+  await child.start();
+  try {
+    const rejected = await child.call("bgmon_start", { command: "sleep 30", origin: "/root/fake" });
+    assert.match(rejected.error, /Unexpected argument: origin/);
+    const first = await root.call("bgmon_start", { command: "sleep 30" });
+    const second = await child.call("bgmon_start", { command: "sleep 30" });
+    assert.ok(first.id, JSON.stringify(first));
+    assert.ok(second.id, JSON.stringify(second));
+    const list = await root.call("bgmon_inspect", {});
+    assert.equal(list.find((j: any) => j.id === first.id).origin, "/root");
+    assert.equal(list.find((j: any) => j.id === second.id).origin, "/root/child");
+    const inspected = await root.call("bgmon_inspect", { id: second.id });
+    assert.equal(inspected.origin, "/root/child");
+    assert.equal(inspected.group, "origin-root");
+  } finally {
+    await root.call("bgmon_control", { action: "server_stop" });
+    await child.call("bgmon_control", { action: "server_stop" });
+    await child.close();
+    await root.close();
+  }
+});
