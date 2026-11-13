@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import type { SessionIdentity } from "./identity.ts";
 import type { Frame } from "./journal.ts";
 import { type LogCursor, Manager, validId } from "./manager.ts";
 import { sanitize } from "./output.ts";
@@ -27,6 +28,7 @@ export type WatchEvent = {
 };
 type Binding = {
   session: string;
+  identity: SessionIdentity;
   active: boolean;
   locate: () => unknown;
   persist: (x: unknown) => void;
