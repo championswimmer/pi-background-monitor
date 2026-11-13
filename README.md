@@ -16,7 +16,7 @@ Reload Pi after installation. A full Pi restart is recommended when upgrading fr
 
 ## Use
 
-Ask Pi to start, inspect, stop or watch a background command. `/bgmon` opens the monitor dashboard; select a job and press Enter for its read-only log, or use `/bgmon settings` to adjust session limits. `/bgmon stop-server` stops your session's private server. Save the `attach` command and `logRef` returned by `bgmon_start` if you may need manual tmux access or explicit historical inspection later.
+Ask Pi to start, inspect, stop or watch a background command. `/bgmon` opens the monitor dashboard; select a job and press Enter for its read-only log, or use `/bgmon settings` to adjust shared group limits. `/bgmon stop-server` stops your session's private server. Save the `attach` command and `logRef` returned by `bgmon_start` if you may need manual tmux access or explicit historical inspection later.
 
 Each job uses an owned private tmux server, not your default server. Jobs normally survive Pi shutdown, but the last live session detaches its controllers: reopening Pi does **not** automatically re-adopt jobs, resume watches, match offline output or restart Pi. A session-owned `logRef` can still be supplied to `bgmon_inspect` for read-only historical logs; it does not restore a controller. Separate Pi processes do not share live monitor identities. Subagent sessions loaded in the same Pi process can share indexed jobs while keeping separate watches and notifications; an inherited tool bridge acts in its host session.
 
@@ -29,6 +29,12 @@ Each job uses an owned private tmux server, not your default server. Jobs normal
 - `bgmon_events`: list or clear this binding's bounded, in-memory event history, including UI-only events in headless sessions. Clearing history does not cancel pending delivery.
 
 Delivery defaults to `ui`, which never enters model context. `nextTurn` waits for an eligible user- or custom-started run; `wake` may start a run when Pi is idle. Automatic alerts include metadata and labels, not command text, patterns or output. Delivery is best effort: submitted batches are unconfirmed until observed; a missing observation can block that mode, and batching limits can defer queued `nextTurn` details to a later run indefinitely.
+
+## Subagents
+
+Enable bgmon under pi-subagent-manager's **[lab] Subagent extensions** setting to give each child its own tools, watches and notifications. Live monitors appear in the root dashboard and inspection list with a harness-assigned origin and group. The root's running and retained monitor limits are shared by the group, including jobs retained after a child ends; if the root binding is absent, defaults apply. Child settings do not set the group budget. Independent root sessions have separate budgets.
+
+Without the lab setting, inherited tool bridges execute in the host session and therefore cannot attribute jobs or watches to the child. Origin is live-process metadata; historical log references do not retain it. A reopened child transcript may retain its subagent marker even outside the manager.
 
 ## Safety and limits
 
