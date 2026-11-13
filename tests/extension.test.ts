@@ -2792,7 +2792,10 @@ test("group limits apply across concurrent children and retained departed jobs",
     assert.ok(winner);
     assert.match(results.find((v: any) => v.error).error, /Maximum 1 running/);
     assert.ok((await other.call("bgmon_start", { command: "sleep 30" })).id);
-    await root.call("bgmon_control", { action: "stop", id: winner.id });
+    // Stop the winner's dedicated server so termination is verified even when
+    // tmux cannot report the PID of an exited pane (notably on macOS).
+    const stopped = await root.call("bgmon_control", { action: "server_stop", id: winner.id });
+    assert.equal(stopped.stopped, true, JSON.stringify(stopped));
     await a.close();
     await b.close();
     const next = await root.call("bgmon_start", { command: "sleep 30" });
@@ -2801,7 +2804,8 @@ test("group limits apply across concurrent children and retained departed jobs",
       (await root.call("bgmon_start", { command: "exit 0" })).error,
       /Maximum 2 retained/,
     );
-    await root.call("bgmon_control", { action: "forget", id: winner.id });
+    const forgotten = await root.call("bgmon_control", { action: "forget", id: winner.id });
+    assert.equal(forgotten.forgotten, winner.id, JSON.stringify(forgotten));
     assert.match(
       (await root.call("bgmon_start", { command: "exit 0" })).error,
       /Maximum 1 running/,
