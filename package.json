@@ -15,6 +15,7 @@
   },
   "files": [
     "src",
+    "docs",
     "README.md"
   ],
   "pi": {

@@ -9,9 +9,15 @@
 - Read installed Pi extension documentation before changing integration or lifecycle behavior.
 - Tools use the `bgmon_` prefix; slash commands and settings live under `/bgmon`.
 
-## Architecture and invariants
+## Repository map
 
-- `src/index.ts` owns Pi tools and binding lifecycle; `src/broker.ts` owns live sharing and watch scheduling; `src/manager.ts` manages jobs and historical references; `src/capture.mjs`, `src/journal.ts`, `src/storage.ts` and `src/text.mjs` implement bounded capture and reading; `src/tmux.ts` wraps private tmux control.
+- `src/index.ts` registers Pi tools and commands and owns binding lifecycle. `src/broker.ts` coordinates shared live monitors, watches and scheduling; `src/manager.ts` manages jobs and historical references.
+- `src/tmux.ts` wraps private tmux control. `src/capture.mjs` is the standalone pipe sink; `src/journal.ts`, `src/storage.ts` and `src/text.mjs` handle bounded log storage and normalized reading. `src/text.d.mts` declares the JavaScript normalizer's types.
+- `src/delivery.ts` manages the live notification inbox; `src/identity.ts` reads subagent identity; `src/regex.ts` isolates regex matching. `src/proof.ts` tracks stop evidence; `src/output.ts` sanitizes and bounds terminal output; `src/limits.ts` defines limits; `src/ui.ts` implements the dashboard and settings.
+- `tests/*.test.ts` contains Node test-runner tests, usually named for the module under test; `tests/extension.test.ts` exercises tool integration. Some tests use real private tmux servers. `.github/workflows/ci.yml` defines CI.
+- `README.md` is the short human-facing introduction; `docs/reference.md` contains detailed usage and operational caveats. Keep both aligned with implementation. `package.json` controls which files ship with the Pi package.
+
+## Architecture and invariants
 - Watches, cursors, notifications and delivery are in memory and exist only in the current live Pi process. Subagent bindings share indexed sources and root-configured group limits; origins come from the harness session marker, not tool arguments. Retained child jobs count until forgotten. Each binding owns its watches. No offline matching, Pi restart, automatic controller adoption or watch recovery. After the last binding leaves, explicit session-owned log references permit historical inspection but do not restore controllers.
 - Never target the user's default tmux server. Use private sockets, verify ownership and producer identity before destructive operations, and clean up test servers in `finally`. Stop can interrupt or kill an owned pane but cannot guarantee termination of detached descendants. Pi shutdown normally detaches jobs; unresolved release writes may retain bounded supervision until settlement.
 - Commands execute with user privileges and are not sandboxed. tmux ownership is not protection from malicious same-user processes. Logs and labels can contain secrets; terminal output is untrusted. Automatic model alerts contain metadata, not commands, patterns or output.
@@ -21,4 +27,4 @@
 
 ## Verification
 
-Run `npm run check`, `npm run lint`, `npm test` and relevant focused regressions. Use `npm run format` before committing and `npm pack --dry-run` when packaging is relevant. CI targets Linux/macOS and Node 22; report actual locally tested platforms and versions.
+Use Node 22+ and tmux 3.2+; install dependencies with `npm ci` when needed. Run `npm run check`, `npm run lint`, `npm test` and relevant focused regressions (for example, `npx tsx --test tests/extension.test.ts`). Use `npm run format` before committing and `npm pack --dry-run` when packaging is relevant. CI uses Node 22 on Linux and, on pushes, macOS; report actual locally tested platforms and versions.
