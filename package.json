@@ -1,6 +1,6 @@
 {
   "name": "pi-background-monitor",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Dedicated tmux background job monitoring for Pi",
   "keywords": ["pi-package", "pi", "tmux", "background jobs"],
   "repository": {
