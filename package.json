@@ -2,12 +2,7 @@
   "name": "pi-background-monitor",
   "version": "1.1.0",
   "description": "Dedicated tmux background job monitoring for Pi",
-  "keywords": [
-    "pi-package",
-    "pi",
-    "tmux",
-    "background jobs"
-  ],
+  "keywords": ["pi-package", "pi", "tmux", "background jobs"],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/championswimmer/pi-background-monitor.git"
