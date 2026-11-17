@@ -27,6 +27,18 @@ Use `/bgmon settings` to adjust shared group limits, or `/bgmon stop-server` to 
 
 Save the `attach` command and `logRef` returned when starting a job if you may need manual tmux access or historical logs. Jobs normally survive Pi shutdown, but reopening Pi does not automatically reconnect controllers or resume watches. The `logRef` allows read-only historical inspection, not controller recovery.
 
+## Tools
+
+| Tool | Arguments | Use when |
+| --- | --- | --- |
+| `bgmon_start` | `command`; optional `id` | Start one long-running command: a build, test suite, server or `tail -f`. |
+| `bgmon_inspect` | none to list; `id` or `logRef` to read; optional `after` cursor to page forward | See what is running, read a job's output, or page through retained history. |
+| `bgmon_watch` | `action` (`add`, `list`, `update`, `remove`); `add` needs `monitorId` and `kind` (`any`, `contains`, `regex`, `exit`); `contains`/`regex` need `pattern`; optional `flags`, `from`, `delivery`, `label`, `ttlSeconds`, `once`; `update`/`remove` need `watchId` | Get called back when output matches or a job stops, instead of polling. |
+| `bgmon_control` | `action` (`stop`, `forget`, `server_stop`, `delete_history`); `id` (needed for `stop`/`forget`, optional for `server_stop`); `logRef` for `delete_history` | Stop a job or free its logs. |
+| `bgmon_events` | `action` (`list`, `clear`) | Review or clear this session's recorded alert history. |
+
+Most arguments are optional and depend on the chosen action. See the [reference](docs/reference.md#tools) for exact rules and limits.
+
 ## Safety
 
 Commands run with your privileges, not in a sandbox, and stopping a job may leave detached descendants running. Logs can contain secrets and persist beyond the conversation; output is untrusted. Logs and notifications are bounded and may have gaps or be delayed.
