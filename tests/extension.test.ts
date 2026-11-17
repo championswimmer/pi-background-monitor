@@ -66,6 +66,7 @@ test("system prompt provides bounded background monitor guidance only when avail
   handler({ systemPromptOptions: options });
   const guidance = options.sections.background_monitor;
   assert.match(guidance, /dev servers.*log streams.*builds.*test suites/);
+  assert.match(guidance, /timed Bash loop/);
   assert.match(guidance, /survive Pi shutdown/);
   assert.match(guidance, /untrusted/);
   assert.match(guidance, /retention or capture failures can create gaps/);
@@ -77,7 +78,10 @@ test("system prompt provides bounded background monitor guidance only when avail
   handler({ systemPromptOptions: options });
   assert.match(options.sections.background_monitor, /any, literal contains, regex/);
   assert.match(options.sections.background_monitor, /i\/u flags/);
-  options.selectedTools = ["bgmon_start", "bgmon_watch"];
+  options.selectedTools = ["bgmon_inspect"];
+  handler({ systemPromptOptions: options });
+  assert.match(options.sections.background_monitor, /after\/next.*search returned text/);
+  options.selectedTools = ["bgmon_start", "bgmon_inspect", "bgmon_watch"];
   handler({ systemPromptOptions: options });
   assert.equal(options.sections.background_monitor.split("\n").length, 5);
   options.selectedTools = [];
@@ -180,6 +184,45 @@ function runtime(session: string, entries: any[] = []) {
       track((await tools.get(name).execute("call", p, undefined, undefined, ctx)).details),
   };
 }
+
+test("a fixed three-sample loop can be watched and its output inspected", async () => {
+  const a = runtime("sampling-workflow");
+  await a.start();
+  try {
+    const job = await a.call("bgmon_start", {
+      command: "for n in 1 2 3; do echo sample-$n; sleep 0.3; done; sleep 2",
+    });
+    assert.ok(job.id);
+    const watch = await a.call("bgmon_watch", {
+      action: "add",
+      monitorId: job.id,
+      kind: "regex",
+      pattern: "sample-[23]",
+      from: "retained",
+      delivery: "wake",
+    });
+    assert.ok(watch.id);
+    const deadline = Date.now() + 8000;
+    let page: any;
+    while (Date.now() < deadline) {
+      page = await a.call("bgmon_inspect", { id: job.id, after: { sequence: 0, offset: 0 } });
+      if (page.untrustedOutput?.text.includes("sample-3") && a.messages.length) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.match(page.untrustedOutput.text, /sample-1/);
+    assert.match(page.untrustedOutput.text, /sample-2/);
+    assert.match(page.untrustedOutput.text, /sample-3/);
+    assert.ok(a.messages.length, "wake notification was not submitted");
+    assert.equal(a.messages[0][1].triggerTurn, true);
+    const state = (await a.call("bgmon_watch", { action: "list" })).find(
+      (w: any) => w.id === watch.id,
+    );
+    assert.equal(state.state, "fired");
+  } finally {
+    await a.call("bgmon_control", { action: "server_stop" });
+    await a.close();
+  }
+});
 
 test("shared identities and subscriptions end with the live process binding", async () => {
   const a = runtime("owner-shared"),

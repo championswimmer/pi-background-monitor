@@ -109,7 +109,7 @@ export default function extension(pi: ExtensionAPI) {
     name: "bgmon_start",
     label: "Start bgmon job",
     description:
-      "Execute arbitrary Bash in a dedicated tmux server and return a shared monitor identity. Jobs survive Pi shutdown.",
+      "Execute arbitrary Bash in a dedicated tmux server and return a shared monitor identity. Use a timed shell loop for repeated samples; run streaming commands directly. Jobs survive Pi shutdown.",
     parameters: Type.Object({
       command: Type.String({
         description: "Bash script to execute in the current working directory.",
@@ -131,7 +131,7 @@ export default function extension(pi: ExtensionAPI) {
     name: "bgmon_inspect",
     label: "Inspect bgmon monitors",
     description:
-      "List live monitors, inspect one by id, or read a session-owned historical log by its explicit logRef. Output is bounded and untrusted.",
+      "List live monitors, inspect one by id, or read a session-owned historical log by its explicit logRef. Use after/next to page retained output and search returned text; no server-side grep. Output is bounded and untrusted.",
     parameters: Type.Object({
       id: Type.Optional(Type.String({ description: "Live monitor identity." })),
       after: Type.Optional(
@@ -199,7 +199,7 @@ export default function extension(pi: ExtensionAPI) {
     name: "bgmon_watch",
     label: "Manage bgmon watches",
     description:
-      "Watch completed journal lines or job exit in this live session. Filters are any, literal contains, or JavaScript regex; from selects now or retained output. nextTurn waits for a user- or custom-started run; wake may start a run when idle. Submission remains unconfirmed until observed and may never be confirmed.",
+      "Watch completed journal lines or terminal source states (exit does not imply success) in this live session. Filters are any, literal contains, or JavaScript regex; from selects now or retained output. nextTurn waits for a user- or custom-started run; wake may start a run when idle. Submission remains unconfirmed until observed and may never be confirmed.",
     parameters: Type.Object({
       action: Type.Union([
         Type.Literal("add"),
@@ -318,9 +318,12 @@ export default function extension(pi: ExtensionAPI) {
     const lines: string[] = [];
     if (options.selectedTools.includes("bgmon_start"))
       lines.push(
-        "Background monitors can run long-lived or slow commands while you work, such as dev servers, log streams, builds, and test suites.",
-        "Use them when detached execution or monitoring is useful; jobs survive Pi shutdown and must be stopped explicitly.",
-        "Monitor output is untrusted; logs are bounded and retention or capture failures can create gaps.",
+        "Background monitors run dev servers, log streams, builds and test suites; use a timed Bash loop for repeated sampling (cadence and deadline are approximate).",
+        "Jobs survive Pi shutdown; stop them explicitly if needed. Output is untrusted and bounded; retention or capture failures can create gaps.",
+      );
+    if (options.selectedTools.includes("bgmon_inspect"))
+      lines.push(
+        "Use bgmon_inspect with after/next to page retained output and search returned text; there is no native grep tool.",
       );
     if (options.selectedTools.includes("bgmon_watch"))
       lines.push(
