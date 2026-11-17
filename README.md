@@ -16,7 +16,14 @@ Reload Pi after installation. A full Pi restart is recommended when upgrading fr
 
 ## Use
 
-Ask Pi to start, inspect, stop or watch a background command. Run `/bgmon` to open the dashboard, select a job and press Enter to view its read-only log. Use `/bgmon settings` to adjust shared group limits, or `/bgmon stop-server` to stop your session's private server.
+Ask Pi in plain language, for example:
+
+- **Build:** “Run `npm run build` in the background. Wake up if the output matches `error|failed`, and check the log later.”
+- **Repeated check:** “Run my health-check command every 5 seconds for about 5 minutes. Wake up if its output contains `unhealthy`, and keep the output for me to inspect.” Pi can run a timed shell loop for this; a continuously running command such as `tail -f` needs no loop.
+
+Pi can page through retained output and read or search the returned pages (there is no server-side grep), or you can use `/bgmon` to select a job and view its read-only log. Output and notifications are bounded, so older lines can be lost. Watches last only while Pi is running; wake-ups are best effort. For exact loop, filter and paging examples, see the [reference](docs/reference.md#workflow-examples).
+
+Use `/bgmon settings` to adjust shared group limits, or `/bgmon stop-server` to stop your session's private server.
 
 Save the `attach` command and `logRef` returned when starting a job if you may need manual tmux access or historical logs. Jobs normally survive Pi shutdown, but reopening Pi does not automatically reconnect controllers or resume watches. The `logRef` allows read-only historical inspection, not controller recovery.
 
