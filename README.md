@@ -12,7 +12,7 @@ Requires Pi 1.5.0+, Node.js 22+, Bash and tmux 3.2+ on Linux or macOS. Install t
 pi install npm:pi-background-monitor
 ```
 
-Reload Pi after installation. A full Pi restart is recommended when upgrading from an older loaded extension. Local and Git installs also work with `pi install`.
+Reload Pi after installation. A full Pi restart is recommended when upgrading from an older loaded extension. For local source checkouts, run `npm install && npm run build` before `pi install .` (or load directly with `pi -e ./src/index.ts`).
 
 ## Use
 

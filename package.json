@@ -10,24 +10,37 @@
   "bugs": "https://github.com/championswimmer/pi-background-monitor/issues",
   "homepage": "https://github.com/championswimmer/pi-background-monitor#readme",
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "engines": {
     "node": ">=22"
   },
   "files": [
-    "src",
+    "dist",
     "docs",
     "README.md"
   ],
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/index.js"
     ]
   },
   "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && node -e \"import('node:fs').then(fs => { for (const f of ['capture.mjs', 'text.mjs', 'text.d.mts']) fs.copyFileSync('src/' + f, 'dist/' + f); })\"",
+    "clean": "rm -rf dist",
     "check": "tsc --noEmit",
     "lint": "biome check src tests",
     "format": "biome format --write src tests",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test tests/*.test.ts",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run build && npm run check && npm run lint && npm test"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=1.5.0",

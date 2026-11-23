@@ -27,4 +27,4 @@
 
 ## Verification
 
-Use Node 22+ and tmux 3.2+; install dependencies with `npm ci` when needed. Run `npm run check`, `npm run lint`, `npm test` and relevant focused regressions (for example, `npx tsx --test tests/extension.test.ts`). Use `npm run format` before committing and `npm pack --dry-run` when packaging is relevant. CI uses Node 22 on Linux and, on pushes, macOS; report actual locally tested platforms and versions.
+Use Node 22+ and tmux 3.2+; install dependencies with `npm ci` when needed. Run `npm run check`, `npm run build`, `npm run lint`, `npm test` and relevant focused regressions (for example, `npx tsx --test tests/extension.test.ts`). Use `npm run format` before committing and `npm pack --dry-run` when packaging is relevant. Published packages ship compiled ESM and `.d.ts` files from `dist/` (gitignored, built via `tsconfig.build.json` and `prepack`/`prepublishOnly`). CI uses Node 22 on Linux and, on pushes, macOS; report actual locally tested platforms and versions.
