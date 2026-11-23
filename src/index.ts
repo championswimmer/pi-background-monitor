@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import { type Binding, broker } from "./broker.ts";
 import { LiveInbox } from "./delivery.ts";
 import { readSubagentIdentity } from "./identity.ts";
-import { DEFAULT_LIMITS, dashboard, type Limits, validLimits } from "./ui.ts";
+import { DEFAULT_LIMITS, type Limits, validLimits } from "./limits.ts";
 
 const ENTRY = "pi-background-monitor:logref:v2";
 const SETTINGS = "pi-background-monitor:settings:v1";
@@ -412,6 +412,8 @@ export default function extension(pi: ExtensionAPI) {
       const controller = new AbortController();
       dashboards.add(controller);
       try {
+        const { dashboard } = await import("./ui.ts");
+        if (!current.active || binding !== current || controller.signal.aborted) return;
         await dashboard(
           ctx,
           Array.isArray(r.details) ? r.details : [],

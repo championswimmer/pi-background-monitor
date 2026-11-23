@@ -11,7 +11,7 @@ import {
   writeStopEvidence,
 } from "./proof.ts";
 
-export type ClientResult = { code: number; stdout: string; stderr: string; truncated: boolean };
+type ClientResult = { code: number; stdout: string; stderr: string; truncated: boolean };
 /** Drain both pipes even after reaching limits; never terminate the server for excess output. */
 export function client(args: string[], timeout = 5000): Promise<ClientResult> {
   return new Promise((resolve, reject) => {
@@ -96,7 +96,7 @@ const ioKey = Symbol.for("pi-background-monitor:timed-io:v1");
 const shared = globalThis as typeof globalThis & { [ioKey: symbol]: unknown };
 if (!shared[ioKey]) shared[ioKey] = { active: 0 };
 const timedIo = shared[ioKey] as { active: number };
-export class IoCapacityError extends Error {
+class IoCapacityError extends Error {
   constructor() {
     super("Timed IO capacity exhausted");
   }

@@ -38,7 +38,7 @@
     ]
   },
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.build.json && node -e \"import('node:fs').then(fs => { for (const f of ['capture.mjs', 'text.mjs', 'text.d.mts']) fs.copyFileSync('src/' + f, 'dist/' + f); })\"",
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && node -e \"import('node:fs').then(fs => { for (const f of fs.readdirSync('dist')) if (f.endsWith('.d.ts') && f !== 'index.d.ts') fs.unlinkSync('dist/' + f); for (const f of ['capture.mjs', 'text.mjs']) fs.copyFileSync('src/' + f, 'dist/' + f); })\"",
     "clean": "rm -rf dist",
     "check": "tsc --noEmit",
     "lint": "biome check src tests",

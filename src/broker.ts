@@ -100,7 +100,7 @@ type Watch = {
   integrityError?: string;
   ioInFlight: number;
 };
-export type WatchOptions = {
+type WatchOptions = {
   id?: string;
   kind?: "any" | "contains" | "regex" | "exit";
   pattern?: string;

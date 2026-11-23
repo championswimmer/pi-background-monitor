@@ -18,7 +18,7 @@ async function privateDirectory(path: string, create = false) {
   if (!s.isDirectory() || s.isSymbolicLink() || s.uid !== process.getuid?.() || s.mode & 0o077)
     throw new Error("Unsafe background log directory");
 }
-export function stateRoot() {
+function stateRoot() {
   const xdg = process.env.XDG_STATE_HOME;
   const base = xdg && isAbsolute(xdg) ? xdg : join(homedir(), ".local", "state");
   return join(base, "pi-background-monitor");
