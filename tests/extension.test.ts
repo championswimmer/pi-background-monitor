@@ -669,12 +669,12 @@ test("bgmon interface validates action arguments and command routing", async () 
     );
     assert.match((await a.call("bgmon_inspect", { id: watch.id })).error, /Unknown monitor/);
     await a.command("bgmon", "stop-server unexpected");
-    assert.match(a.notices.at(-1)!, /Usage/);
+    assert.match(a.notices.at(-1) ?? "", /Usage/);
     assert.equal((await a.call("bgmon_inspect", { id: job.id })).state, "running");
     await a.command("bgmon", "list");
-    assert.match(a.notices.at(-1)!, new RegExp(job.id));
+    assert.match(a.notices.at(-1) ?? "", new RegExp(job.id));
     await a.command("bgmon", "stop-server");
-    assert.match(a.notices.at(-1)!, /"stopped": true/);
+    assert.match(a.notices.at(-1) ?? "", /"stopped": true/);
   } finally {
     await a.call("bgmon_control", { action: "server_stop" });
     await a.close();
@@ -981,10 +981,8 @@ test("settings remain accessible when monitor data cannot be loaded and support 
 
     // Open TUI settings dialog and verify session_shutdown aborts it cleanly
     a.ctx.mode = "tui";
-    let resolveOverlay!: (val: any) => void;
     a.ctx.ui.custom = (factory: any) =>
       new Promise<any>((resolve) => {
-        resolveOverlay = resolve;
         factory(
           { mode: "fullscreen", terminal: { rows: 24, columns: 86 }, requestRender() {} },
           { fg: (_: any, v: string) => v, bg: (_: any, v: string) => v, bold: (v: string) => v },
@@ -1561,7 +1559,7 @@ test("failed captures drain all published pages before failing a watch", async (
     assert.equal(seen.captureHealth, "complete");
     const { readdir, writeFile } = await import("node:fs/promises");
     const dir = join(
-      process.env.XDG_STATE_HOME!,
+      testStateHome,
       "pi-background-monitor",
       "owners",
       job.logRef.owner,
@@ -2134,7 +2132,7 @@ test("a journal gap fails closed instead of matching uncertain OSC payload", asy
     }
     assert.equal(seen.captureHealth, "complete");
     const dir = join(
-      process.env.XDG_STATE_HOME!,
+      testStateHome,
       "pi-background-monitor",
       "owners",
       job.logRef.owner,
@@ -2210,7 +2208,7 @@ test("new watches remain usable after normal journal rotation", async () => {
     }
     assert.equal(seen.capture, "complete");
     const dir = join(
-      process.env.XDG_STATE_HOME!,
+      testStateHome,
       "pi-background-monitor",
       "owners",
       job.logRef.owner,

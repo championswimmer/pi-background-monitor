@@ -361,18 +361,20 @@ class Broker {
         const owner = p.id ? this.find(p.id) : this.owner(binding);
         return owner.manager.run(() => owner.manager.serverStop(() => binding.active));
       }
-      const owner = this.find(p.id);
+      const id = p.id;
+      if (!id) throw new Error("Unknown monitor identity");
+      const owner = this.find(id);
       if (action === "inspect")
         return {
-          ...(await owner.manager.run(() => owner.manager.inspect(p.id!, p.after))),
+          ...(await owner.manager.run(() => owner.manager.inspect(id, p.after))),
           origin: owner.identity.origin,
           group: owner.identity.group,
         };
       if (action === "stop")
-        return owner.manager.run(() => owner.manager.stop(p.id!, () => binding.active));
+        return owner.manager.run(() => owner.manager.stop(id, () => binding.active));
       if (action === "forget") {
-        const r = await owner.manager.run(() => owner.manager.forget(p.id!, () => binding.active));
-        this.monitors.delete(p.id!);
+        const r = await owner.manager.run(() => owner.manager.forget(id, () => binding.active));
+        this.monitors.delete(id);
         for (const w of this.watches.values()) if (w.job === p.id) this.finish(w, "source_removed");
         await this.releaseEmptyOwner(owner);
         return r;
@@ -412,13 +414,14 @@ class Broker {
       this.validateOptions(p);
       if (p.kind === "regex") {
         try {
-          new RegExp(p.pattern!, p.flags ?? "");
+          new RegExp(p.pattern ?? "", p.flags ?? "");
         } catch {
           throw new Error("Invalid regex syntax");
         }
       }
-      const owner = this.find(p.id),
-        jobId = p.id!;
+      const jobId = p.id;
+      if (!jobId) throw new Error("Unknown monitor identity");
+      const owner = this.find(jobId);
       const ownerCount = physical.filter(
         (v) => v.owner.manager.session === owner.manager.session,
       ).length;
@@ -597,10 +600,11 @@ class Broker {
     if (state !== "fired" || w.kind === "exit") this.notice(w, error ?? state);
   }
   private async line(w: Watch, line: string) {
-    let matched = w.kind === "any" || (w.kind === "contains" && line.includes(w.pattern!));
+    const pattern = w.pattern ?? "";
+    let matched = w.kind === "any" || (w.kind === "contains" && line.includes(pattern));
     if (w.kind === "regex") {
       try {
-        matched = await this.regex.test(w.pattern!, w.flags ?? "", line);
+        matched = await this.regex.test(pattern, w.flags ?? "", line);
       } catch {
         this.finish(w, "failed", "regex_evaluation_failed");
         return;
@@ -649,7 +653,8 @@ class Broker {
         lines < 200 &&
         performance.now() < budgetEnd
       ) {
-        const code = w.pending.codePointAt(w.pendingIndex)!;
+        const code = w.pending.codePointAt(w.pendingIndex);
+        if (code === undefined) break;
         const char = String.fromCodePoint(code);
         w.pendingIndex += char.length;
         w.textPosition = { sequence: w.pendingSeq, normalizedOffsetUtf16: w.pendingIndex };

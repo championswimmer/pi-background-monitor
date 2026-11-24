@@ -9,8 +9,7 @@ export class TextNormalizer {
     this.pending = Buffer.alloc(0);
     if (snapshot !== undefined) {
       if (
-        !snapshot ||
-        snapshot.version !== 1 ||
+        snapshot?.version !== 1 ||
         !["text", "escape", "escape-intermediate", "csi", "string", "string-escape"].includes(
           snapshot.mode,
         ) ||

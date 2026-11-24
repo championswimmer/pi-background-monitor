@@ -83,8 +83,7 @@ export class LogStorage {
   async resolve(value: unknown) {
     const ref = value as LogRef;
     if (
-      !ref ||
-      ref.version !== 1 ||
+      ref?.version !== 1 ||
       ref.session !== this.session ||
       !validIdentity(ref.owner) ||
       !validIdentity(ref.stream) ||

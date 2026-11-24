@@ -140,8 +140,9 @@ export class Manager {
     if (!j.pane || !j.pid || j.generation !== this.generation)
       return { state: "lost", capture: "unknown" };
     try {
-      if (!(await this.verified())) return { state: "capture_unverified", capture: "unknown" };
-      const current = await this.tm!.sourceStatus(j.pane, j.ref.stream, j.pid);
+      if (!(await this.verified()) || !this.tm)
+        return { state: "capture_unverified", capture: "unknown" };
+      const current = await this.tm.sourceStatus(j.pane, j.ref.stream, j.pid);
       if (current.state === "unverified")
         return {
           state: "source_unverified",
