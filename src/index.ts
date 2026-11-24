@@ -3,10 +3,14 @@ import { Type } from "typebox";
 import { type Binding, broker } from "./broker.ts";
 import { LiveInbox } from "./delivery.ts";
 import { readSubagentIdentity } from "./identity.ts";
-import { DEFAULT_LIMITS, type Limits, validLimits } from "./limits.ts";
+import { DEFAULT_LIMITS, type Limits } from "./limits.ts";
+import {
+  type BgmonSettingsStore,
+  bgmonSettingsSchema,
+  createBgmonSettingsStore,
+} from "./settings.ts";
 
 const ENTRY = "pi-background-monitor:logref:v2";
-const SETTINGS = "pi-background-monitor:settings:v1";
 const LOG_REF = Type.Object({
   version: Type.Literal(1),
   session: Type.String(),
@@ -16,20 +20,32 @@ const LOG_REF = Type.Object({
 });
 export default function extension(pi: ExtensionAPI) {
   let binding: Binding | undefined;
+  let store: BgmonSettingsStore | undefined;
   const dashboards = new Set<AbortController>();
   let limits: Limits = { ...DEFAULT_LIMITS };
   let inbox: LiveInbox | undefined;
   let settledTimer: ReturnType<typeof setTimeout> | undefined;
   let generation = 0;
-  function create(ctx: ExtensionContext) {
+  async function create(ctx: ExtensionContext, currentGeneration: number) {
     const session = ctx.sessionManager.getSessionId();
-    limits = { ...DEFAULT_LIMITS };
-    for (const e of ctx.sessionManager.getEntries()) {
-      if (e.type === "custom" && e.customType === SETTINGS) {
-        const data = e.data as { session?: string; limits?: unknown } | undefined;
-        if (data?.session === session && validLimits(data.limits)) limits = { ...data.limits };
-      }
+    const nextStore = createBgmonSettingsStore({
+      cwd: ctx.cwd,
+      session,
+      appendEntry: (entryType, data) => pi.appendEntry(entryType, data),
+      getEntries: () => ctx.sessionManager.getEntries(),
+    });
+    let nextLimits: Limits = { ...DEFAULT_LIMITS };
+    try {
+      const trustedProject =
+        typeof ctx.isProjectTrusted === "function" ? ctx.isProjectTrusted() : false;
+      const loaded = await nextStore.load({ trustedProject });
+      nextLimits = { ...loaded.effective };
+    } catch {
+      nextLimits = { ...DEFAULT_LIMITS };
     }
+    if (generation !== currentGeneration) return;
+    store = nextStore;
+    limits = nextLimits;
     const current: Binding = {
       session,
       identity: readSubagentIdentity(ctx.sessionManager.getEntries()) ?? {
@@ -349,6 +365,7 @@ export default function extension(pi: ExtensionAPI) {
     const previous = binding;
     if (previous) previous.active = false;
     binding = undefined;
+    store = undefined;
     for (const dashboard of dashboards) dashboard.abort();
     dashboards.clear();
     if (settledTimer) clearTimeout(settledTimer);
@@ -356,13 +373,14 @@ export default function extension(pi: ExtensionAPI) {
     inbox?.close();
     inbox = undefined;
     if (previous) await broker.leave(previous);
-    if (generation === currentGeneration) create(ctx);
+    if (generation === currentGeneration) await create(ctx, currentGeneration);
   });
   pi.on("session_shutdown", async () => {
     generation++;
     const old = binding;
     if (old) old.active = false;
     binding = undefined;
+    store = undefined;
     for (const dashboard of dashboards) dashboard.abort();
     dashboards.clear();
     if (settledTimer) clearTimeout(settledTimer);
@@ -385,14 +403,41 @@ export default function extension(pi: ExtensionAPI) {
         ctx.ui.notify("Usage: /bgmon [list | settings | stop-server]", "info");
         return;
       }
-      if (command === "settings" && (!ctx.hasUI || ctx.mode !== "tui")) {
-        ctx.ui.notify("/bgmon settings requires TUI mode", "error");
-        return;
-      }
       const current = get();
       if (command === "stop-server") {
         const r = await run(() => broker.action(current, "server_stop", {}));
         if (current.active && binding === current) ctx.ui.notify(r.content[0].text, "info");
+        return;
+      }
+      if (command === "settings") {
+        const currentStore = store;
+        if (!currentStore) throw new Error("No active Pi session");
+        const controller = new AbortController();
+        dashboards.add(controller);
+        try {
+          const { openSettingsDialog } = await import("pi-extension-settings-tui/adapter");
+          if (!current.active || binding !== current || controller.signal.aborted) return;
+          const result = await openSettingsDialog(ctx, {
+            schema: bgmonSettingsSchema,
+            store: currentStore,
+            cwd: ctx.cwd,
+            signal: controller.signal,
+            onApply: (next) => {
+              if (!current.active || current !== binding) return;
+              limits = { ...next };
+            },
+          });
+          if (
+            !result.opened &&
+            result.closedBy === "headless" &&
+            current.active &&
+            binding === current
+          ) {
+            ctx.ui.notify(JSON.stringify(result.values, null, 2), "info");
+          }
+        } finally {
+          dashboards.delete(controller);
+        }
         return;
       }
       const r = await run(() => broker.action(current, "list", {}));
@@ -418,13 +463,6 @@ export default function extension(pi: ExtensionAPI) {
           ctx,
           Array.isArray(r.details) ? r.details : [],
           Array.isArray(w.details) ? w.details : [],
-          limits,
-          (value) => {
-            if (!current.active || current !== binding) return;
-            limits = value;
-            pi.appendEntry(SETTINGS, { session: current.session, limits });
-          },
-          command === "settings" ? "settings" : "list",
           listError,
           {
             inspect: (id) => broker.action(current, "inspect", { id }),

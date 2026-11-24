@@ -13,7 +13,7 @@
 
 - `src/index.ts` registers Pi tools and commands and owns binding lifecycle. `src/broker.ts` coordinates shared live monitors, watches and scheduling; `src/manager.ts` manages jobs and historical references.
 - `src/tmux.ts` wraps private tmux control. `src/capture.mjs` is the standalone pipe sink; `src/journal.ts`, `src/storage.ts` and `src/text.mjs` handle bounded log storage and normalized reading. `src/text.d.mts` declares the JavaScript normalizer's types.
-- `src/delivery.ts` manages the live notification inbox; `src/identity.ts` reads subagent identity; `src/regex.ts` isolates regex matching. `src/proof.ts` tracks stop evidence; `src/output.ts` sanitizes and bounds terminal output; `src/limits.ts` defines limits; `src/ui.ts` implements the dashboard and settings.
+- `src/delivery.ts` manages the live notification inbox; `src/identity.ts` reads subagent identity; `src/regex.ts` isolates regex matching. `src/proof.ts` tracks stop evidence; `src/output.ts` sanitizes and bounds terminal output; `src/limits.ts` defines limits; `src/settings.ts` defines the 3-layer (`global` + `project` + `session`) `pi-extension-settings-tui` schema and store; `src/ui.ts` implements the monitor list and output viewer dashboard (`/bgmon list` and `/bgmon settings` are separate entry points).
 - `tests/*.test.ts` contains Node test-runner tests, usually named for the module under test; `tests/extension.test.ts` exercises tool integration. Some tests use real private tmux servers. `.github/workflows/ci.yml` defines CI.
 - `README.md` is the short human-facing introduction; `docs/reference.md` contains detailed usage and operational caveats. Keep both aligned with implementation. `package.json` controls which files ship with the Pi package.
 

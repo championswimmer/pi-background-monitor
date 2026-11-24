@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import {
+  KeybindingsManager,
+  stripTerminalSequences,
+  TUI_KEYBINDINGS,
+  visibleWidth,
+} from "@earendil-works/pi-tui";
 import extension from "../src/index.ts";
 import { checked, Tmux } from "../src/tmux.ts";
 
@@ -24,6 +29,7 @@ async function waitForBackground(promise: Promise<void>) {
 
 const sockets = new Set<string>();
 const previousStateHome = process.env.XDG_STATE_HOME;
+const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 let testStateHome = "";
 function track(value: any) {
   if (typeof value?.socket === "string" && /^\/tmp\/pbm-[A-Za-z0-9]{6}\/s$/.test(value.socket))
@@ -33,6 +39,8 @@ function track(value: any) {
 beforeEach(async () => {
   testStateHome = await mkdtemp(join(tmpdir(), "pbm-extension-"));
   process.env.XDG_STATE_HOME = testStateHome;
+  process.env.PI_CODING_AGENT_DIR = join(testStateHome, "agent");
+  await mkdir(process.env.PI_CODING_AGENT_DIR, { recursive: true });
 });
 afterEach(async () => {
   for (const socket of sockets) {
@@ -49,6 +57,8 @@ afterEach(async () => {
   await rm(testStateHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   if (previousStateHome === undefined) delete process.env.XDG_STATE_HOME;
   else process.env.XDG_STATE_HOME = previousStateHome;
+  if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+  else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
 });
 
 test("system prompt provides bounded background monitor guidance only when available", () => {
@@ -751,14 +761,12 @@ test("dashboard displays sanitized command and watch information and completes s
         },
       );
       output = component.render(80);
-      component.handleInput("\t");
-      assert.match(component.render(80).join("\n"), /Maximum running monitors/);
-      component.handleInput("\t");
       assert.ok(output.every((line: string) => visibleWidth(line) === 80));
       const narrow = component.render(30);
       assert.match(output.join("\n"), /Events 0.*queued 0.*in flight 0/);
       assert.match(narrow.join("\n"), /Events 0/);
       assert.ok(narrow.every((line: string) => visibleWidth(line) === 30));
+      assert.doesNotMatch(output.join("\n"), /Tab switch/);
       component.handleInput("tui.select.cancel");
       assert.equal(closed, true);
     };
@@ -773,70 +781,153 @@ test("dashboard displays sanitized command and watch information and completes s
   }
 });
 
-test("settings dialog changes and saves session limits", async () => {
+test("settings dialog edits session limits live, shows 3 provenance dots, and promotes to global/project on Ctrl+S", async () => {
   const { initTheme } = await import("@earendil-works/pi-coding-agent");
   initTheme("dark", false);
+  const agentDir = join(testStateHome, "agent");
+  const projectDir = join(testStateHome, "project");
+  await mkdir(join(projectDir, ".pi"), { recursive: true });
+  await writeFile(join(agentDir, "pi-background-monitor.json"), JSON.stringify({ maxOpen: 6 }));
+  await writeFile(
+    join(projectDir, ".pi", "pi-background-monitor.json"),
+    JSON.stringify({ maxTotal: 24 }),
+  );
+
   const a = runtime("settings-dialog");
+  a.ctx.cwd = projectDir;
+  a.ctx.isProjectTrusted = () => true;
   await a.start();
   try {
     a.ctx.hasUI = true;
     a.ctx.mode = "tui";
+    const keybindings = new KeybindingsManager(TUI_KEYBINDINGS);
     a.ctx.ui.custom = async (factory: any, options: any) => {
       assert.equal(options.overlay, true);
+      let resolveDone!: (value: any) => void;
+      const donePromise = new Promise<any>((r) => {
+        resolveDone = r;
+      });
       const component = factory(
-        { terminal: { rows: 24 }, requestRender() {} },
+        { mode: "fullscreen", terminal: { rows: 24, columns: 86 }, requestRender() {} },
         {
           fg: (_: any, value: string) => value,
-          bg: (_: any, value: string) => `\x1b[44m${value}\x1b[49m`,
+          bg: (_: any, value: string) => value,
           bold: (value: string) => value,
         },
-        { matches: (data: string, key: string) => data === key },
-        () => {},
+        keybindings,
+        resolveDone,
       );
-      const lines = component.render(50);
-      assert.ok(lines.join("\n").includes("\x1b[44m ● Settings \x1b[49m"));
-      component.handleInput("\t");
-      assert.ok(component.render(50).join("\n").includes("\x1b[44m ● Monitors \x1b[49m"));
-      component.handleInput("\t");
-      for (const invalid of ["0", "65", "-1", "1.5"]) {
-        for (const char of invalid) component.handleInput(char);
+      component.focused = true;
+      let lines = component.render(84).map(stripTerminalSequences);
+      assert.ok(
+        lines.some(
+          (l: string) =>
+            l.includes("Saved:") &&
+            l.includes("Global") &&
+            l.includes("Project") &&
+            l.includes("Session"),
+        ),
+      );
+      assert.ok(
+        lines.some(
+          (l: string) =>
+            l.includes("Maximum running monitors") && l.includes("●    ") && l.includes("6"),
+        ),
+      );
+      assert.ok(
+        lines.some(
+          (l: string) =>
+            l.includes("Maximum retained monitors") && l.includes("  ●  ") && l.includes("24"),
+        ),
+      );
+
+      // Open integer editor for Maximum running monitors and test invalid input guard
+      component.handleInput("\r");
+      for (const invalid of ["0", "65"]) {
+        component.handleInput("\x15"); // Ctrl+U clear
+        for (const ch of invalid) component.handleInput(ch);
         component.handleInput("\r");
-        assert.match(component.render(50).join("\n"), /whole number from 1 to 64/);
-        assert.equal(
-          a.entries.filter((e: any) => e.customType === "pi-background-monitor:settings:v1").length,
-          0,
+        assert.match(
+          stripTerminalSequences(component.render(84).join("\n")),
+          /at least 1|at most 64/,
         );
-        for (const _ of invalid) component.handleInput("\x7f");
       }
+      // Enter valid 1 -> commits live to session only
+      component.handleInput("\x15");
       component.handleInput("1");
       component.handleInput("\r");
-      component.handleInput("\x1b[B");
-      component.handleInput("6");
-      component.handleInput("4");
-      component.handleInput("\r");
+      await new Promise((r) => setTimeout(r, 25));
+
+      lines = component.render(84).map(stripTerminalSequences);
+      assert.ok(lines[1].includes("● Session"));
+      assert.ok(
+        lines.some(
+          (l: string) =>
+            l.includes("Maximum running monitors") && l.includes("●   ●") && l.includes("1"),
+        ),
+      );
+      // Global & Project files are untouched while session entry has override
+      assert.deepEqual(
+        JSON.parse(await readFile(join(agentDir, "pi-background-monitor.json"), "utf8")),
+        { maxOpen: 6 },
+      );
+      assert.deepEqual(
+        JSON.parse(await readFile(join(projectDir, ".pi", "pi-background-monitor.json"), "utf8")),
+        { maxTotal: 24 },
+      );
+      assert.equal(
+        a.entries.filter((e: any) => e.customType === "pi-background-monitor:settings:v1").length,
+        1,
+      );
+
+      // Esc closes while keeping the live session override intact
+      component.handleInput("\x1b");
+      return donePromise;
     };
+
     await a.command("bgmon", "settings");
-    const entries = a.entries.filter(
-      (e: any) => e.customType === "pi-background-monitor:settings:v1",
-    );
-    assert.deepEqual(
-      entries.map((e: any) => e.data.limits),
-      [
-        { maxOpen: 1, maxTotal: 16 },
-        { maxOpen: 1, maxTotal: 64 },
-      ],
-    );
     const first = await a.call("bgmon_start", { command: "sleep 30" });
     assert.ok(first.id);
     assert.match((await a.call("bgmon_start", { command: "sleep 30" })).error, /Maximum 1 running/);
+
+    // Reopen, switch Save scope to Project, and Ctrl+S -> saves to project file and clears session override
+    a.ctx.ui.custom = async (factory: any) => {
+      let resolveDone!: (value: any) => void;
+      const donePromise = new Promise<any>((r) => {
+        resolveDone = r;
+      });
+      const component = factory(
+        { mode: "fullscreen", terminal: { rows: 24, columns: 86 }, requestRender() {} },
+        {
+          fg: (_: any, value: string) => value,
+          bg: (_: any, value: string) => value,
+          bold: (value: string) => value,
+        },
+        keybindings,
+        resolveDone,
+      );
+      component.focused = true;
+      component.handleInput("\x1b[B"); // maxTotal
+      component.handleInput("\x1b[B"); // Save scope
+      component.handleInput("\r"); // Global -> Project
+      component.handleInput("\x13"); // Ctrl+S
+      return donePromise;
+    };
+    await a.command("bgmon", "settings");
+
+    assert.deepEqual(
+      JSON.parse(await readFile(join(projectDir, ".pi", "pi-background-monitor.json"), "utf8")),
+      { maxOpen: 1, maxTotal: 24 },
+    );
+    assert.equal(a.entries.at(-1).data.__deleted, true);
   } finally {
     await a.call("bgmon_control", { action: "server_stop" });
     await a.close();
   }
 });
 
-test("settings remain accessible when monitor data cannot be loaded", async () => {
-  const { dashboard, DEFAULT_LIMITS } = await import("../src/ui.ts");
+test("settings remain accessible when monitor data cannot be loaded and support RPC, untrusted project, and shutdown abort", async () => {
+  const { dashboard } = await import("../src/ui.ts");
   const { initTheme } = await import("@earendil-works/pi-coding-agent");
   initTheme("dark", false);
   const ctx: any = {
@@ -846,19 +937,68 @@ test("settings remain accessible when monitor data cannot be loaded", async () =
           { terminal: { rows: 24 }, requestRender() {} },
           {
             fg: (_: string, value: string) => value,
-            bg: (_: string, value: string) => `\x1b[44m${value}\x1b[49m`,
+            bg: (_: string, value: string) => value,
             bold: (value: string) => value,
           },
           { matches: (data: string, key: string) => data === key },
           () => {},
         );
-        component.handleInput("\t");
         assert.match(component.render(80).join("\n"), /monitor data unavailable/);
         assert.doesNotMatch(component.render(80).join("\n"), /No monitors yet/);
       },
     },
   };
-  await dashboard(ctx, [], [], DEFAULT_LIMITS, () => {}, "settings", "monitor data unavailable");
+  await dashboard(ctx, [], [], "monitor data unavailable");
+
+  // Untrusted project ignores project overrides, RPC mode edits session live, and shutdown aborts open dialog
+  const projectDir = join(testStateHome, "untrusted-proj");
+  await mkdir(join(projectDir, ".pi"), { recursive: true });
+  await writeFile(
+    join(projectDir, ".pi", "pi-background-monitor.json"),
+    JSON.stringify({ maxOpen: 1 }),
+  );
+
+  const a = runtime("settings-rpc-shutdown");
+  a.ctx.cwd = projectDir;
+  a.ctx.isProjectTrusted = () => false;
+  await a.start();
+  try {
+    // RPC mode works for /bgmon settings without querying monitor list
+    a.ctx.hasUI = true;
+    a.ctx.mode = "rpc";
+    const selectAnswers = [
+      (opts: string[]) => opts.find((o) => o.includes("Maximum running monitors: 8")),
+      () => "Done",
+    ];
+    a.ctx.ui.select = async (_title: string, opts: string[]) => selectAnswers.shift()?.(opts);
+    a.ctx.ui.input = async () => "2";
+    await a.command("bgmon", "settings");
+    assert.equal(selectAnswers.length, 0);
+    assert.deepEqual(a.entries.at(-1).data, {
+      session: "settings-rpc-shutdown",
+      overrides: { maxOpen: 2 },
+    });
+
+    // Open TUI settings dialog and verify session_shutdown aborts it cleanly
+    a.ctx.mode = "tui";
+    let resolveOverlay!: (val: any) => void;
+    a.ctx.ui.custom = (factory: any) =>
+      new Promise<any>((resolve) => {
+        resolveOverlay = resolve;
+        factory(
+          { mode: "fullscreen", terminal: { rows: 24, columns: 86 }, requestRender() {} },
+          { fg: (_: any, v: string) => v, bg: (_: any, v: string) => v, bold: (v: string) => v },
+          new KeybindingsManager(TUI_KEYBINDINGS),
+          resolve,
+        );
+      });
+    const pending = a.command("bgmon", "settings");
+    await new Promise((r) => setTimeout(r, 20));
+    await a.close();
+    await pending;
+  } finally {
+    await a.close();
+  }
 });
 
 test("dashboard output uses the same inspection path without controlling the named job", async () => {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { DEFAULT_LIMITS, dashboard } from "../src/ui.ts";
+import { dashboard } from "../src/ui.ts";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -50,9 +50,6 @@ test("output view polls serially, ignores stale results, and cancels on shutdown
       { id: "two", state: "running" },
     ],
     [],
-    DEFAULT_LIMITS,
-    () => {},
-    "list",
     undefined,
     {
       signal: controller.signal,
@@ -175,9 +172,6 @@ test("lost and empty snapshots remain usable at narrow and resized dimensions", 
       { id: "empty", state: "running" },
     ],
     [],
-    DEFAULT_LIMITS,
-    () => {},
-    "list",
     undefined,
     {
       signal: controller.signal,
@@ -211,7 +205,7 @@ test("lost and empty snapshots remain usable at narrow and resized dimensions", 
   assert.equal(closed, true);
 });
 
-test("monitor dashboard renders origin and shared limits copy", async () => {
+test("monitor dashboard renders origin without a settings tab", async () => {
   let component: any;
   const ctx: any = {
     ui: {
@@ -233,12 +227,9 @@ test("monitor dashboard renders origin and shared limits copy", async () => {
     ctx,
     [{ id: "job", state: "running", origin: "/root/child", command: "echo hi" }],
     [],
-    DEFAULT_LIMITS,
-    () => {},
   );
   const list = component.render(100).join("\n");
   assert.match(list, /ORIGIN/);
   assert.match(list, /Origin: \/root\/child/);
-  component.handleInput("\t");
-  assert.match(component.render(100).join("\n"), /Limits shared with subagents/);
+  assert.doesNotMatch(list, /Tab switch/);
 });

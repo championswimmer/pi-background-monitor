@@ -1,13 +1,11 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
-  Input,
   Key,
   matchesKey,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { type Limits, MAX_MONITORS } from "./limits.ts";
 import { sanitize } from "./output.ts";
 
 export type { Limits } from "./limits.ts";
@@ -73,14 +71,11 @@ export async function dashboard(
   ctx: ExtensionContext,
   jobs: Job[],
   watches: Watch[],
-  limits: Limits,
-  save: (value: Limits) => void,
-  initialTab: "list" | "settings" = "list",
   listError?: string,
   viewer?: Viewer,
 ) {
   await ctx.ui.custom<void>((tui, theme, keys, done) => {
-    let tab: "list" | "settings" | "output" = initialTab;
+    let tab: "list" | "output" = "list";
     let selected = 0;
     let snapshot: Snapshot | undefined;
     let error: string | undefined;
@@ -159,38 +154,6 @@ export async function dashboard(
       tab = "list";
     };
     if (viewer?.signal.aborted) queueMicrotask(abort);
-    let setting = 0;
-    let settingsError = "";
-    const fields = [
-      { id: "maxOpen", label: "Maximum running monitors", description: "Default: 8" },
-      {
-        id: "maxTotal",
-        label: "Maximum retained monitors",
-        description: "Default: 16; includes finished, cancelled and lost jobs",
-      },
-    ] as const;
-    const input = new Input({ prompt: "> ", placeholder: "Type a number" });
-    input.focused = true;
-    const clearInput = () => {
-      input.setValue("");
-      settingsError = "";
-    };
-    const submit = () => {
-      const text = input.getValue();
-      const value = Number(text);
-      if (
-        !/^\d+$/.test(text) ||
-        !Number.isSafeInteger(value) ||
-        value < 1 ||
-        value > MAX_MONITORS
-      ) {
-        settingsError = `Enter a whole number from 1 to ${MAX_MONITORS}.`;
-        return;
-      }
-      limits = { ...limits, [fields[setting].id]: value };
-      save(limits);
-      clearInput();
-    };
 
     return {
       render(width: number) {
@@ -200,7 +163,9 @@ export async function dashboard(
             : theme.fg("muted", `   ${label} `);
         const tabs = [
           theme.fg("accent", theme.bold("Background monitors")),
-          `${tabLabel("Settings", tab === "settings")}  ${tabLabel("Monitors", tab === "list")}${tab === "output" ? `  ${tabLabel("Output", true)}` : `  ${theme.fg("dim", "Tab switch")}`}`,
+          tab === "output"
+            ? `${tabLabel("Monitors", false)}  ${tabLabel("Output", true)}`
+            : tabLabel("Monitors", true),
           "",
         ];
         if (tab === "output") {
@@ -263,33 +228,6 @@ export async function dashboard(
           ];
           return frame(lines, width, rows, (s) => theme.fg("border", s));
         }
-        if (tab === "settings") {
-          const compact = (tui.terminal.rows || 24) < 15;
-          const lines = [
-            ...tabs.slice(0, compact ? 2 : undefined),
-            ...(compact
-              ? []
-              : [
-                  theme.fg("accent", theme.bold("Settings")),
-                  theme.fg(
-                    "muted",
-                    `Limits shared with subagents (1–${MAX_MONITORS}); lowering never removes jobs.`,
-                  ),
-                ]),
-            ...fields.flatMap((field, i) => [
-              theme.fg(
-                i === setting ? "accent" : "text",
-                `${i === setting ? "›" : " "} ${field.label}: ${limits[field.id]}`,
-              ),
-              ...(compact ? [] : [theme.fg("muted", `  ${field.description}`)]),
-            ]),
-            ...(compact ? [] : [""]),
-            ...input.render(Math.max(1, width - 2)),
-            ...(settingsError ? [theme.fg("error", settingsError)] : []),
-            theme.fg("muted", "↑/↓ select · type number · Enter save · Tab switch · Esc close"),
-          ];
-          return frame(lines, width, tui.terminal.rows || 24, (s) => theme.fg("border", s));
-        }
         const status = viewer?.eventStatus?.();
         const lines: string[] = [
           ...tabs,
@@ -335,7 +273,7 @@ export async function dashboard(
             if (own.length > 3) lines.push(`  +${own.length - 3} more watches`);
           }
         }
-        lines.push("", theme.fg("muted", "↑/↓ select · Enter output · Esc close · Tab switch"));
+        lines.push("", theme.fg("muted", "↑/↓ select · Enter output · Esc close"));
         return frame(lines, width, tui.terminal.rows || 24, (s) => theme.fg("border", s));
       },
       handleInput(data: string) {
@@ -346,25 +284,6 @@ export async function dashboard(
             const next = displayedTop + 1;
             scrollTop = next >= maxTop ? undefined : next;
           } else if (matchesKey(data, Key.end)) scrollTop = undefined;
-        } else if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab"))) {
-          tab = tab === "list" ? "settings" : "list";
-          clearInput();
-        } else if (tab === "settings") {
-          if (keys.matches(data, "tui.select.cancel") || matchesKey(data, Key.escape)) {
-            dispose();
-            done();
-          } else if (keys.matches(data, "tui.select.up") || matchesKey(data, Key.up)) {
-            setting = Math.max(0, setting - 1);
-            clearInput();
-          } else if (keys.matches(data, "tui.select.down") || matchesKey(data, Key.down)) {
-            setting = Math.min(fields.length - 1, setting + 1);
-            clearInput();
-          } else if (keys.matches(data, "tui.select.confirm") || matchesKey(data, Key.enter))
-            submit();
-          else {
-            input.handleInput(data);
-            settingsError = "";
-          }
         } else if (keys.matches(data, "tui.select.cancel")) {
           dispose();
           done();
@@ -375,9 +294,7 @@ export async function dashboard(
         tui.requestRender();
       },
       dispose,
-      invalidate() {
-        input.invalidate();
-      },
+      invalidate() {},
     };
   }, overlay);
 }
