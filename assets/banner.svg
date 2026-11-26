@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1b212c"/><stop offset="1" stop-color="#0a0d12"/></linearGradient>
+<linearGradient id="tile" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3b4658"/><stop offset="1" stop-color="#151a23"/></linearGradient>
+<radialGradient id="glow" cx="0.2" cy="0.5" r="0.6"><stop offset="0" stop-color="#3ddc84" stop-opacity="0.16"/><stop offset="1" stop-color="#3ddc84" stop-opacity="0"/></radialGradient></defs>
+<rect width="1200" height="630" fill="url(#bg)"/><rect width="1200" height="630" fill="url(#glow)"/>
+<g transform="translate(110,115) scale(0.78125)">
+<rect width="512" height="512" rx="112" fill="url(#tile)"/>
+<rect x="76" y="106" width="360" height="300" rx="44" fill="#0d1117" stroke="#d5dbe4" stroke-width="26"/>
+<path d="M76 190H436" stroke="#d5dbe4" stroke-width="26"/>
+<path d="M120 330H190L222 252L262 372L298 290H392" fill="none" stroke="#3ddc84" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+</g>
+<text x="540" y="305" font-family="Inter, Helvetica, Arial, sans-serif" font-weight="700" font-size="50" fill="#f1f4f8">pi-background-monitor</text>
+<rect x="542" y="334" width="72" height="6" rx="3" fill="#3ddc84"/>
+<text x="540" y="394" font-family="Inter, Helvetica, Arial, sans-serif" font-size="30" fill="#aab4c3">Background jobs, watched in tmux.</text>
+</svg>
