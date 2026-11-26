@@ -1,27 +1,23 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
 <defs><radialGradient id="v" cx="50%" cy="50%" r="75%"><stop offset="55%" stop-color="#000" stop-opacity="0"/><stop offset="100%" stop-color="#000" stop-opacity=".45"/></radialGradient></defs>
 <rect width="1200" height="630" fill="#0d1116"/>
-<g stroke="#fff" stroke-opacity=".04" shape-rendering="crispEdges"><path d="M0 0V630"/><path d="M40 0V630"/><path d="M80 0V630"/><path d="M120 0V630"/><path d="M160 0V630"/><path d="M200 0V630"/><path d="M240 0V630"/><path d="M280 0V630"/><path d="M320 0V630"/><path d="M360 0V630"/><path d="M400 0V630"/><path d="M440 0V630"/><path d="M480 0V630"/><path d="M520 0V630"/><path d="M560 0V630"/><path d="M600 0V630"/><path d="M640 0V630"/><path d="M680 0V630"/><path d="M720 0V630"/><path d="M760 0V630"/><path d="M800 0V630"/><path d="M840 0V630"/><path d="M880 0V630"/><path d="M920 0V630"/><path d="M960 0V630"/><path d="M1000 0V630"/><path d="M1040 0V630"/><path d="M1080 0V630"/><path d="M1120 0V630"/><path d="M1160 0V630"/><path d="M0 0H1200"/><path d="M0 40H1200"/><path d="M0 80H1200"/><path d="M0 120H1200"/><path d="M0 160H1200"/><path d="M0 200H1200"/><path d="M0 240H1200"/><path d="M0 280H1200"/><path d="M0 320H1200"/><path d="M0 360H1200"/><path d="M0 400H1200"/><path d="M0 440H1200"/><path d="M0 480H1200"/><path d="M0 520H1200"/><path d="M0 560H1200"/><path d="M0 600H1200"/></g>
+<g stroke="#fff" stroke-opacity=".04" shape-rendering="crispEdges"><path d="M0 0V630M0 0H1200"/><path d="M40 0V630M0 40H1200"/><path d="M80 0V630M0 80H1200"/><path d="M120 0V630M0 120H1200"/><path d="M160 0V630M0 160H1200"/><path d="M200 0V630M0 200H1200"/><path d="M240 0V630M0 240H1200"/><path d="M280 0V630M0 280H1200"/><path d="M320 0V630M0 320H1200"/><path d="M360 0V630M0 360H1200"/><path d="M400 0V630M0 400H1200"/><path d="M440 0V630M0 440H1200"/><path d="M480 0V630M0 480H1200"/><path d="M520 0V630M0 520H1200"/><path d="M560 0V630M0 560H1200"/><path d="M600 0V630M0 600H1200"/><path d="M680 0V630"/><path d="M720 0V630"/><path d="M760 0V630"/><path d="M800 0V630"/><path d="M840 0V630"/><path d="M880 0V630"/><path d="M920 0V630"/><path d="M960 0V630"/><path d="M1000 0V630"/><path d="M1040 0V630"/><path d="M1080 0V630"/><path d="M1120 0V630"/><path d="M1160 0V630"/><path d="M1200 0V630"/></g>
 <rect width="1200" height="630" fill="url(#v)"/>
-<g transform="translate(96 175) scale(0.546875)" shape-rendering="crispEdges">
+<g transform="translate(88 155) scale(0.625)" shape-rendering="crispEdges">
 <rect width="512" height="512" rx="88" fill="#161d27"/>
 <g stroke="#fff" stroke-opacity=".045" stroke-width="1"><path d="M32 0V512M0 32H512"/><path d="M64 0V512M0 64H512"/><path d="M96 0V512M0 96H512"/><path d="M128 0V512M0 128H512"/><path d="M160 0V512M0 160H512"/><path d="M192 0V512M0 192H512"/><path d="M224 0V512M0 224H512"/><path d="M256 0V512M0 256H512"/><path d="M288 0V512M0 288H512"/><path d="M320 0V512M0 320H512"/><path d="M352 0V512M0 352H512"/><path d="M384 0V512M0 384H512"/><path d="M416 0V512M0 416H512"/><path d="M448 0V512M0 448H512"/><path d="M480 0V512M0 480H512"/></g>
 <rect x="6" y="6" width="500" height="500" rx="82" fill="none" stroke="#495059" stroke-width="2"/>
 <g stroke="#757d89" stroke-width="2" fill="none"><path d="M48 28H28V48"/><path d="M464 28H484V48"/><path d="M48 484H28V464"/><path d="M464 484H484V464"/></g>
-<g transform="translate(128 128)">
-<rect width="256" height="256" fill="#757d89"/>
-<rect x="16" y="16" width="224" height="16" fill="#252f3d"/>
-<rect x="32" y="16" width="16" height="16" fill="#495059"/><rect x="64" y="16" width="16" height="16" fill="#495059"/><rect x="96" y="16" width="16" height="16" fill="#495059"/>
-<rect x="16" y="32" width="224" height="208" fill="#0d1116"/>
-<g fill="#a3a473"><rect x="16" y="144" width="64" height="16"/><rect x="80" y="128" width="16" height="32"/><rect x="96" y="96" width="16" height="48"/><rect x="112" y="64" width="16" height="48"/><rect x="128" y="96" width="16" height="48"/><rect x="144" y="128" width="16" height="48"/><rect x="160" y="160" width="16" height="48"/><rect x="176" y="144" width="16" height="48"/><rect x="192" y="144" width="32" height="16"/></g>
-<rect x="224" y="144" width="16" height="16" fill="#F1BE58"/>
-<rect x="32" y="208" width="16" height="16" fill="#4D9ABF"/><rect x="64" y="208" width="32" height="16" fill="#4b607c"/>
+<rect x="88" y="88" width="336" height="336" fill="#757d89"/>
+<rect x="112" y="160" width="288" height="240" fill="#0d1116"/>
+<rect x="328" y="112" width="48" height="24" fill="#F1BE58"/>
+<g fill="#a3a473"><rect x="112" y="304" width="72" height="24"/><rect x="184" y="256" width="24" height="72"/><rect x="208" y="184" width="24" height="96"/><rect x="232" y="256" width="24" height="96"/><rect x="256" y="328" width="24" height="48"/><rect x="280" y="304" width="24" height="72"/><rect x="304" y="304" width="96" height="24"/></g>
+<rect x="136" y="352" width="24" height="48" fill="#4D9ABF"/>
 </g>
-</g>
-<text x="430" y="300" font-family="CaskaydiaCove Nerd Font Mono, DejaVu Sans Mono, monospace" font-weight="700" font-size="50" fill="#ebe7e4">pi-background-monitor</text>
-<rect x="1068" y="262" width="26" height="46" fill="#a3a473" shape-rendering="crispEdges"/>
-<rect x="430" y="336" width="72" height="4" fill="#a3a473" shape-rendering="crispEdges"/>
-<text x="430" y="392" font-family="CaskaydiaCove Nerd Font Mono, DejaVu Sans Mono, monospace" font-size="28" fill="#9fa4ab">Background jobs, watched in tmux</text>
-<text x="96" y="570" font-family="CaskaydiaCove Nerd Font Mono, DejaVu Sans Mono, monospace" font-size="18" fill="#757d89">pi extension</text>
+<text x="470" y="300" font-family="CaskaydiaCove Nerd Font Mono, DejaVu Sans Mono, monospace" font-weight="700" font-size="46" fill="#ebe7e4">pi-background-monitor</text>
+<rect x="1066" y="266" width="24" height="34" fill="#a3a473" shape-rendering="crispEdges"/>
+<rect x="470" y="336" width="72" height="4" fill="#a3a473" shape-rendering="crispEdges"/>
+<text x="470" y="392" font-family="CaskaydiaCove Nerd Font Mono, DejaVu Sans Mono, monospace" font-size="28" fill="#9fa4ab">Background jobs, watched in tmux</text>
+<text x="88" y="540" font-family="CaskaydiaCove Nerd Font Mono, DejaVu Sans Mono, monospace" font-size="18" fill="#757d89">pi extension</text>
 <path d="M1104 64H1136V96" stroke="#757d89" stroke-width="2" fill="none" shape-rendering="crispEdges"/>
 </svg>
