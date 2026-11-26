@@ -1,4 +1,4 @@
-# pi-background-monitor
+# <img src="https://raw.githubusercontent.com/championswimmer/pi-background-monitor/main/assets/icon.png" width="44" height="44" align="absmiddle" alt=""> pi-background-monitor
 
 [![npm version](https://img.shields.io/npm/v/pi-background-monitor)](https://www.npmjs.com/package/pi-background-monitor)
 
