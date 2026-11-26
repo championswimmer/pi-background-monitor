@@ -1,15 +1,27 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
-<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#1b212c"/><stop offset="1" stop-color="#0a0d12"/></linearGradient>
-<linearGradient id="tile" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3b4658"/><stop offset="1" stop-color="#151a23"/></linearGradient>
-<radialGradient id="glow" cx="0.2" cy="0.5" r="0.6"><stop offset="0" stop-color="#3ddc84" stop-opacity="0.16"/><stop offset="1" stop-color="#3ddc84" stop-opacity="0"/></radialGradient></defs>
-<rect width="1200" height="630" fill="url(#bg)"/><rect width="1200" height="630" fill="url(#glow)"/>
-<g transform="translate(110,115) scale(0.78125)">
-<rect width="512" height="512" rx="112" fill="url(#tile)"/>
-<rect x="76" y="106" width="360" height="300" rx="44" fill="#0d1117" stroke="#d5dbe4" stroke-width="26"/>
-<path d="M76 190H436" stroke="#d5dbe4" stroke-width="26"/>
-<path d="M120 330H190L222 252L262 372L298 290H392" fill="none" stroke="#3ddc84" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+<defs><radialGradient id="v" cx="50%" cy="50%" r="75%"><stop offset="55%" stop-color="#000" stop-opacity="0"/><stop offset="100%" stop-color="#000" stop-opacity=".45"/></radialGradient></defs>
+<rect width="1200" height="630" fill="#0d1116"/>
+<g stroke="#fff" stroke-opacity=".04" shape-rendering="crispEdges"><path d="M0 0V630"/><path d="M40 0V630"/><path d="M80 0V630"/><path d="M120 0V630"/><path d="M160 0V630"/><path d="M200 0V630"/><path d="M240 0V630"/><path d="M280 0V630"/><path d="M320 0V630"/><path d="M360 0V630"/><path d="M400 0V630"/><path d="M440 0V630"/><path d="M480 0V630"/><path d="M520 0V630"/><path d="M560 0V630"/><path d="M600 0V630"/><path d="M640 0V630"/><path d="M680 0V630"/><path d="M720 0V630"/><path d="M760 0V630"/><path d="M800 0V630"/><path d="M840 0V630"/><path d="M880 0V630"/><path d="M920 0V630"/><path d="M960 0V630"/><path d="M1000 0V630"/><path d="M1040 0V630"/><path d="M1080 0V630"/><path d="M1120 0V630"/><path d="M1160 0V630"/><path d="M0 0H1200"/><path d="M0 40H1200"/><path d="M0 80H1200"/><path d="M0 120H1200"/><path d="M0 160H1200"/><path d="M0 200H1200"/><path d="M0 240H1200"/><path d="M0 280H1200"/><path d="M0 320H1200"/><path d="M0 360H1200"/><path d="M0 400H1200"/><path d="M0 440H1200"/><path d="M0 480H1200"/><path d="M0 520H1200"/><path d="M0 560H1200"/><path d="M0 600H1200"/></g>
+<rect width="1200" height="630" fill="url(#v)"/>
+<g transform="translate(96 175) scale(0.546875)" shape-rendering="crispEdges">
+<rect width="512" height="512" rx="88" fill="#161d27"/>
+<g stroke="#fff" stroke-opacity=".045" stroke-width="1"><path d="M32 0V512M0 32H512"/><path d="M64 0V512M0 64H512"/><path d="M96 0V512M0 96H512"/><path d="M128 0V512M0 128H512"/><path d="M160 0V512M0 160H512"/><path d="M192 0V512M0 192H512"/><path d="M224 0V512M0 224H512"/><path d="M256 0V512M0 256H512"/><path d="M288 0V512M0 288H512"/><path d="M320 0V512M0 320H512"/><path d="M352 0V512M0 352H512"/><path d="M384 0V512M0 384H512"/><path d="M416 0V512M0 416H512"/><path d="M448 0V512M0 448H512"/><path d="M480 0V512M0 480H512"/></g>
+<rect x="6" y="6" width="500" height="500" rx="82" fill="none" stroke="#495059" stroke-width="2"/>
+<g stroke="#757d89" stroke-width="2" fill="none"><path d="M48 28H28V48"/><path d="M464 28H484V48"/><path d="M48 484H28V464"/><path d="M464 484H484V464"/></g>
+<g transform="translate(128 128)">
+<rect width="256" height="256" fill="#757d89"/>
+<rect x="16" y="16" width="224" height="16" fill="#252f3d"/>
+<rect x="32" y="16" width="16" height="16" fill="#495059"/><rect x="64" y="16" width="16" height="16" fill="#495059"/><rect x="96" y="16" width="16" height="16" fill="#495059"/>
+<rect x="16" y="32" width="224" height="208" fill="#0d1116"/>
+<g fill="#a3a473"><rect x="16" y="144" width="64" height="16"/><rect x="80" y="128" width="16" height="32"/><rect x="96" y="96" width="16" height="48"/><rect x="112" y="64" width="16" height="48"/><rect x="128" y="96" width="16" height="48"/><rect x="144" y="128" width="16" height="48"/><rect x="160" y="160" width="16" height="48"/><rect x="176" y="144" width="16" height="48"/><rect x="192" y="144" width="32" height="16"/></g>
+<rect x="224" y="144" width="16" height="16" fill="#F1BE58"/>
+<rect x="32" y="208" width="16" height="16" fill="#4D9ABF"/><rect x="64" y="208" width="32" height="16" fill="#4b607c"/>
 </g>
-<text x="540" y="305" font-family="Inter, Helvetica, Arial, sans-serif" font-weight="700" font-size="50" fill="#f1f4f8">pi-background-monitor</text>
-<rect x="542" y="334" width="72" height="6" rx="3" fill="#3ddc84"/>
-<text x="540" y="394" font-family="Inter, Helvetica, Arial, sans-serif" font-size="30" fill="#aab4c3">Background jobs, watched in tmux.</text>
+</g>
+<text x="430" y="300" font-family="CaskaydiaCove Nerd Font Mono, DejaVu Sans Mono, monospace" font-weight="700" font-size="50" fill="#ebe7e4">pi-background-monitor</text>
+<rect x="1068" y="262" width="26" height="46" fill="#a3a473" shape-rendering="crispEdges"/>
+<rect x="430" y="336" width="72" height="4" fill="#a3a473" shape-rendering="crispEdges"/>
+<text x="430" y="392" font-family="CaskaydiaCove Nerd Font Mono, DejaVu Sans Mono, monospace" font-size="28" fill="#9fa4ab">Background jobs, watched in tmux</text>
+<text x="96" y="570" font-family="CaskaydiaCove Nerd Font Mono, DejaVu Sans Mono, monospace" font-size="18" fill="#757d89">pi extension</text>
+<path d="M1104 64H1136V96" stroke="#757d89" stroke-width="2" fill="none" shape-rendering="crispEdges"/>
 </svg>
