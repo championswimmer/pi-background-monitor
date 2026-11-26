@@ -1,4 +1,4 @@
-# <img src="https://raw.githubusercontent.com/championswimmer/pi-background-monitor/main/assets/icon.png" width="44" height="44" align="absmiddle" alt=""> pi-background-monitor
+![pi-background-monitor](https://raw.githubusercontent.com/championswimmer/pi-background-monitor/main/assets/banner.png)
 
 [![npm version](https://img.shields.io/npm/v/pi-background-monitor)](https://www.npmjs.com/package/pi-background-monitor)
 
@@ -6,15 +6,31 @@ A [Pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) exte
 
 ## Install
 
-Requires Pi 1.5.0+, Node.js 22+, Bash and tmux 3.2+ on Linux or macOS. Install tmux with your package manager, then:
-
 ```sh
 pi install npm:pi-background-monitor
 ```
 
-Reload Pi after installation. A full Pi restart is recommended when upgrading from an older loaded extension. For local source checkouts, run `npm install && npm run build` before `pi install .` (or load directly with `pi -e ./src/index.ts`).
+### Requirements
 
-## Use
+Requires Pi 1.5.0+, Node.js 22+, Bash and tmux 3.2+ on Linux or macOS. Install tmux with your package manager first.
+
+### After installing
+
+Reload Pi after installation. A full Pi restart is recommended when upgrading from an older loaded extension.
+
+### From a local checkout
+
+For local source checkouts, run `npm install && npm run build` before `pi install .` (or load directly with `pi -e ./src/index.ts`).
+
+## Why use it
+
+- Run builds, test suites, servers or `tail -f` in the background while Pi keeps working.
+- Get woken up only when output matches a pattern or a job exits, instead of polling.
+- Page through retained logs, or open a read-only log viewer with `/bgmon`.
+- Jobs run in private tmux sessions and normally survive Pi shutdown.
+- Output and notifications are bounded, with gaps made visible.
+
+## How to use
 
 Ask Pi in plain language, for example:
 
