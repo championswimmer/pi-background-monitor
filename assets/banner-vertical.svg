@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" viewBox="0 0 1080 1920">
+<defs><radialGradient id="g" cx="50%" cy="50%" r="50%"><stop offset="0" stop-color="#a3a473" stop-opacity=".18"/><stop offset="1" stop-color="#a3a473" stop-opacity="0"/></radialGradient>
+<radialGradient id="v" cx="50%" cy="50%" r="75%"><stop offset=".6" stop-color="#000" stop-opacity="0"/><stop offset="1" stop-color="#000" stop-opacity=".4"/></radialGradient></defs>
+<rect width="1080" height="1920" fill="#0d1116"/>
+<g stroke="#fff" stroke-opacity=".035" stroke-width="1"><path d="M40 0V1920"/><path d="M80 0V1920"/><path d="M120 0V1920"/><path d="M160 0V1920"/><path d="M200 0V1920"/><path d="M240 0V1920"/><path d="M280 0V1920"/><path d="M320 0V1920"/><path d="M360 0V1920"/><path d="M400 0V1920"/><path d="M440 0V1920"/><path d="M480 0V1920"/><path d="M520 0V1920"/><path d="M560 0V1920"/><path d="M600 0V1920"/><path d="M640 0V1920"/><path d="M680 0V1920"/><path d="M720 0V1920"/><path d="M760 0V1920"/><path d="M800 0V1920"/><path d="M840 0V1920"/><path d="M880 0V1920"/><path d="M920 0V1920"/><path d="M960 0V1920"/><path d="M1000 0V1920"/><path d="M1040 0V1920"/><path d="M0 40H1080"/><path d="M0 80H1080"/><path d="M0 120H1080"/><path d="M0 160H1080"/><path d="M0 200H1080"/><path d="M0 240H1080"/><path d="M0 280H1080"/><path d="M0 320H1080"/><path d="M0 360H1080"/><path d="M0 400H1080"/><path d="M0 440H1080"/><path d="M0 480H1080"/><path d="M0 520H1080"/><path d="M0 560H1080"/><path d="M0 600H1080"/><path d="M0 640H1080"/><path d="M0 680H1080"/><path d="M0 720H1080"/><path d="M0 760H1080"/><path d="M0 800H1080"/><path d="M0 840H1080"/><path d="M0 880H1080"/><path d="M0 920H1080"/><path d="M0 960H1080"/><path d="M0 1000H1080"/><path d="M0 1040H1080"/><path d="M0 1080H1080"/><path d="M0 1120H1080"/><path d="M0 1160H1080"/><path d="M0 1200H1080"/><path d="M0 1240H1080"/><path d="M0 1280H1080"/><path d="M0 1320H1080"/><path d="M0 1360H1080"/><path d="M0 1400H1080"/><path d="M0 1440H1080"/><path d="M0 1480H1080"/><path d="M0 1520H1080"/><path d="M0 1560H1080"/><path d="M0 1600H1080"/><path d="M0 1640H1080"/><path d="M0 1680H1080"/><path d="M0 1720H1080"/><path d="M0 1760H1080"/><path d="M0 1800H1080"/><path d="M0 1840H1080"/><path d="M0 1880H1080"/></g>
+<rect width="1080" height="1920" fill="url(#v)"/>
+<circle cx="540" cy="1500" r="520" fill="url(#g)" opacity=".6"/>
+<rect x="72" y="156" width="16" height="16" fill="#a3a473"/>
+<text x="100" y="172" font-family="'Departure Mono', 'DejaVu Sans Mono', monospace" font-size="26" fill="#757d89">pi extension</text>
+<g stroke="#757d89" stroke-width="2" fill="none"><path d="M1008 150H1040V182"/><path d="M72 1850V1882H104"/></g>
+<circle cx="540" cy="480" r="400" fill="url(#g)"/>
+<rect x="332" y="272" width="440" height="440" rx="76" fill="none" stroke="#495059" stroke-width="2"/>
+<g stroke="#a3a473" stroke-width="4" fill="none"><path d="M296 236H340M296 236V280"/><path d="M784 236H740M784 236V280"/><path d="M296 724H340M296 724V680"/><path d="M784 724H740M784 724V680"/></g>
+<g transform="translate(320 260) scale(0.8594)">
+<rect width="512" height="512" rx="88" fill="#161d27"/>
+<g stroke="#fff" stroke-opacity=".045" stroke-width="1"><path d="M32 0V512M0 32H512"/><path d="M64 0V512M0 64H512"/><path d="M96 0V512M0 96H512"/><path d="M128 0V512M0 128H512"/><path d="M160 0V512M0 160H512"/><path d="M192 0V512M0 192H512"/><path d="M224 0V512M0 224H512"/><path d="M256 0V512M0 256H512"/><path d="M288 0V512M0 288H512"/><path d="M320 0V512M0 320H512"/><path d="M352 0V512M0 352H512"/><path d="M384 0V512M0 384H512"/><path d="M416 0V512M0 416H512"/><path d="M448 0V512M0 448H512"/><path d="M480 0V512M0 480H512"/></g>
+<rect x="6" y="6" width="500" height="500" rx="82" fill="none" stroke="#495059" stroke-width="2"/>
+<g stroke="#757d89" stroke-width="2" fill="none"><path d="M48 28H28V48"/><path d="M464 28H484V48"/><path d="M48 484H28V464"/><path d="M464 484H484V464"/></g>
+<rect x="88" y="88" width="336" height="336" fill="#757d89"/>
+<rect x="112" y="160" width="288" height="240" fill="#0d1116"/>
+<rect x="328" y="112" width="48" height="24" fill="#F1BE58"/>
+<g fill="#a3a473"><rect x="112" y="304" width="72" height="24"/><rect x="184" y="256" width="24" height="72"/><rect x="208" y="184" width="24" height="96"/><rect x="232" y="256" width="24" height="96"/><rect x="256" y="328" width="24" height="48"/><rect x="280" y="304" width="24" height="72"/><rect x="304" y="304" width="96" height="24"/></g>
+<rect x="136" y="352" width="24" height="48" fill="#4D9ABF"/>
+</g>
+
+<text x="72" y="812" font-family="'Departure Mono', 'DejaVu Sans Mono', monospace" font-size="60" fill="#ebe7e4">pi-background-monitor</text>
+<rect x="884" y="768" width="34" height="54" fill="#a3a473"/>
+<text x="72" y="872" font-family="CommitMono, 'DejaVu Sans Mono', monospace" font-size="32" fill="#9fa4ab">Long-running tmux jobs, logs</text>
+<text x="72" y="914" font-family="CommitMono, 'DejaVu Sans Mono', monospace" font-size="32" fill="#9fa4ab">and selective alerts</text>
+<rect x="72" y="980" width="936" height="470" rx="10" fill="#161d27" stroke="#495059" stroke-width="1.5"/>
+<path d="M72 1034H1008" stroke="#495059" stroke-width="1.5"/>
+<circle cx="102" cy="1007" r="7" fill="#495059"/><circle cx="126" cy="1007" r="7" fill="#495059"/><circle cx="150" cy="1007" r="7" fill="#a3a473"/>
+<text x="540" y="1015" text-anchor="middle" font-family="CommitMono, 'DejaVu Sans Mono', monospace" font-size="24" fill="#757d89">/bgmon list</text>
+<text x="100" y="1085" font-family="CommitMono, 'DejaVu Sans Mono', monospace" font-weight="700" font-size="26" fill="#ebe7e4">build</text><text x="236" y="1085" font-family="CommitMono, 'DejaVu Sans Mono', monospace" font-size="26" fill="#9fa4ab">npm run build</text><rect x="858" y="1055" width="122" height="44" rx="5" fill="#a3a473" fill-opacity=".16" stroke="#a3a473" stroke-width="1.5"/><text x="919" y="1085" text-anchor="middle" font-family="CommitMono, 'DejaVu Sans Mono', monospace" font-weight="700" font-size="26" fill="#a3a473">running</text><text x="100" y="1150" font-family="CommitMono, 'DejaVu Sans Mono', monospace" font-weight="700" font-size="26" fill="#ebe7e4">tests</text><text x="236" y="1150" font-family="CommitMono, 'DejaVu Sans Mono', monospace" font-size="26" fill="#9fa4ab">npm test</text><rect x="858" y="1120" width="122" height="44" rx="5" fill="#5db87a" fill-opacity=".16" stroke="#5db87a" stroke-width="1.5"/><text x="919" y="1150" text-anchor="middle" font-family="CommitMono, 'DejaVu Sans Mono', monospace" font-weight="700" font-size="26" fill="#5db87a">done</text><text x="100" y="1215" font-family="CommitMono, 'DejaVu Sans Mono', monospace" font-weight="700" font-size="26" fill="#ebe7e4">logs</text><text x="236" y="1215" font-family="CommitMono, 'DejaVu Sans Mono', monospace" font-size="26" fill="#9fa4ab">tail -f app.log</text><rect x="858" y="1185" width="122" height="44" rx="5" fill="#e8704f" fill-opacity=".16" stroke="#e8704f" stroke-width="1.5"/><text x="919" y="1215" text-anchor="middle" font-family="CommitMono, 'DejaVu Sans Mono', monospace" font-weight="700" font-size="26" fill="#e8704f">failed</text>
+<path d="M92 1252H988" stroke="#495059" stroke-width="1.5" stroke-dasharray="3 6"/>
+<text x="100" y="1304" font-family="CommitMono, 'DejaVu Sans Mono', monospace" font-size="26" fill="#a3a473">watch</text><text x="236" y="1304" font-family="CommitMono, 'DejaVu Sans Mono', monospace" font-size="26" fill="#9fa4ab">/error|failed/</text>
+<text x="100" y="1376" font-family="CommitMono, 'DejaVu Sans Mono', monospace" font-size="24" fill="#757d89">wake-up</text>
+<polyline points="250,1372 322,1372 350,1372 368,1345 388,1390 405,1360 419,1372 523,1372 551,1372 569,1333 589,1399 609,1372 695,1372 781,1372 798,1354 815,1378 830,1372 976,1372" fill="none" stroke="#a3a473" stroke-width="3.5" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="976" cy="1372" r="7" fill="#a3a473"/>
+<text x="540" y="1566" text-anchor="middle" font-family="CommitMono, 'DejaVu Sans Mono', monospace" font-size="28"><tspan fill="#a3a473" font-weight="700">$</tspan><tspan dx="16" fill="#9fa4ab">pi install npm:pi-background-monitor</tspan></text>
+<text x="540" y="1612" text-anchor="middle" font-family="CommitMono, 'DejaVu Sans Mono', monospace" font-size="22" fill="#757d89">github.com/championswimmer/pi-background-monitor</text>
+</svg>
